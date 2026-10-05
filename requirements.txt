@@ -1,0 +1,6 @@
+streamlit>=1.50
+pandas>=2.0
+numpy
+altair>=5
+gspread>=6
+google-auth
