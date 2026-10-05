@@ -15,6 +15,11 @@ import streamlit as st
 # CONFIG - edit this section
 # =====================================================================
 REFRESH_MINUTES = 10  # how often the dashboard re-reads the sheet
+
+# Your Google Sheet and key file (the same ones your Jupyter notebook uses).
+# Put the key file in the same folder as app.py.
+SHEET_NAME = "Appointment Setter"
+KEY_FILE = "lsw-marketing-b9a13bd21034.json"
 MIN_DATE = dt.date(2025, 1, 1)
 MAX_DATE = dt.date(2026, 9, 30)
 
@@ -122,8 +127,15 @@ def require_password():
 
 
 require_password()
-SHEET_CFG = secret("gsheet")
-DEMO_MODE = SHEET_CFG is None or secret("gcp_service_account") is None
+import json
+from pathlib import Path
+
+_key_path = Path(__file__).resolve().parent / KEY_FILE
+SHEET_CFG = secret("gsheet") or {"name": SHEET_NAME}
+KEY_INFO = secret("gcp_service_account")
+if KEY_INFO is None and _key_path.exists():
+    KEY_INFO = json.loads(_key_path.read_text(encoding="utf-8"))
+DEMO_MODE = KEY_INFO is None
 
 
 # =====================================================================
@@ -138,9 +150,11 @@ def read_tabs():
     from google.oauth2.service_account import Credentials
 
     creds = Credentials.from_service_account_info(
-        dict(secret("gcp_service_account")),
-        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
-    book = gspread.authorize(creds).open_by_url(SHEET_CFG["url"])
+        dict(KEY_INFO),
+        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly",
+                "https://www.googleapis.com/auth/drive.readonly"])
+    client = gspread.authorize(creds)
+    book = client.open_by_url(SHEET_CFG["url"]) if SHEET_CFG.get("url") else client.open(SHEET_CFG["name"])
     tabs = {}
     for ws in book.worksheets():
         rows = ws.get_all_values()
@@ -405,7 +419,7 @@ except Exception as err:
     st.stop()
 
 st.markdown('<div class="dash topbar"><h1>Appointment setting</h1>'
-            f'<span>{"Demo data: add Google Sheet secrets to see real numbers" if DEMO_MODE else ""}</span></div>',
+            f'<span>{f"DEMO DATA: key file {KEY_FILE} not found next to app.py" if DEMO_MODE else ""}</span></div>',
             unsafe_allow_html=True)
 r1, r2 = st.columns([5, 1])
 r1.caption(f"Data read from the sheet at {loaded_at:%b %d, %I:%M %p}. "
