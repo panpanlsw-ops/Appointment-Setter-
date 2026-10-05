@@ -752,9 +752,9 @@ with tab_sales:
             st.caption(f"Each row in “{ALL_TAB}” is one lead, counted for the person who created it ({ALL_COLS['lead_by']}). "
                        f"Appointments, cancellations and orders are of those leads. "
                        f"{no_owner:,} rows with no creator are left out.")
-            st.caption(f"Sorted by orders. “vs setters” = the rep’s rate minus the appointment setters’ rate "
-                       f"(Apt / Leads {fmt_pct(setters['Apt / Leads'])}, Order / Leads {fmt_pct(setters['Order / Leads'])}), "
-                       f"in percentage points. Positive = better than the setters.")
+            st.caption(f"Sorted by orders. “vs setters” = the rep’s % minus the appointment setters’ %. "
+                       f"Example: a rep with Apt / Leads 0.0% vs setters {fmt_pct(setters['Apt / Leads'])} shows "
+                       f"▼ −{fmt_pct(setters['Apt / Leads'])}. ▲ blue = better than setters, ▼ orange = worse.")
             # Rows sorted by orders, then two summary rows like the design
             show = t.copy()
             summary = pd.DataFrame([
@@ -765,10 +765,12 @@ with tab_sales:
                  "Apt / Leads vs setters": np.nan, "Order / Leads vs setters": np.nan},
             ], index=["All sales reps", "Appointment setters"])
             show = pd.concat([show, summary[show.columns]])
+            for col in ["Leads", "Appointments", "Cancelled", "Orders"]:
+                show[col] = show[col].astype(int)
             show.index.name = "Sales rep"
 
             def fmt_diff(v):
-                return "–" if pd.isna(v) else f"{'▲ +' if v >= 0 else '▼ −'}{abs(v):.1f} pts"
+                return "–" if pd.isna(v) else f"{'▲ +' if v >= 0 else '▼ −'}{abs(v):.1f}%"
 
             def diff_style(v):
                 if pd.isna(v):
@@ -783,11 +785,15 @@ with tab_sales:
                     return [f"color: {BLUE}; font-weight: 600"] * len(row)
                 return [""] * len(row)
 
-            diff_cols = ["Apt / Leads vs setters", "Order / Leads vs setters"]
+            # Put the setters' % in the header so the math is visible
+            a_col = f"Apt / Leads vs setters ({fmt_pct(setters['Apt / Leads'])})"
+            o_col = f"Order / Leads vs setters ({fmt_pct(setters['Order / Leads'])})"
+            show = show.rename(columns={"Apt / Leads vs setters": a_col, "Order / Leads vs setters": o_col})
+            diff_cols = [a_col, o_col]
             styled = (show.style
-                      .format({c: "{:,.0f}" for c in ["Leads", "Appointments", "Cancelled", "Orders"]})
-                      .format({c: lambda v: fmt_pct(v) for c in ["Apt / Leads", "Order / Leads"]})
-                      .format({c: fmt_diff for c in diff_cols})
+                      .format({**{c: "{:,.0f}" for c in ["Leads", "Appointments", "Cancelled", "Orders"]},
+                               **{c: fmt_pct for c in ["Apt / Leads", "Order / Leads"]},
+                               **{c: fmt_diff for c in diff_cols}})
                       .map(diff_style, subset=diff_cols)
                       .apply(summary_rows, axis=1))
             st.dataframe(styled, height=min(38 * (len(show) + 1) + 4, 680))
