@@ -14,25 +14,30 @@ import streamlit as st
 # =====================================================================
 # CONFIG - edit this section
 # =====================================================================
+REFRESH_MINUTES = 10  # how often the dashboard re-reads the sheet
 MIN_DATE = dt.date(2025, 1, 1)
 MAX_DATE = dt.date(2026, 9, 30)
-SETTER_DEPT = "Appointment Setter"   # value in the department column for setters
-EXCLUDE_REP_IDS = ["1261"]           # reps to leave out everywhere
 
-# Worksheet (tab) names in your Google Sheet, and the column headers each one must have.
-# Row 1 of each worksheet = headers. Extra columns are fine and ignored.
-SHEETS = {
-    "reps":         ("reps",         ["rep_id", "rep_name", "department"]),
-    "leads":        ("leads",        ["leads_id", "created_date", "created_by", "salesreps_id"]),
-    "appointments": ("appointments", ["apt_id", "leads_id", "created_date", "created_by", "salesreps_id"]),
-    "quotes":       ("quotes",       ["quote_id", "leads_id", "created_date"]),
-    "orders":       ("orders",       ["order_id", "leads_id", "created_date"]),
-    "calls":        ("calls",        None),   # GoTo call history, headers set in GOTO_COLS below
+# ---- Setter performance tab ------------------------------------------
+# Worksheet names and the column headers to use from each.
+LEADS_TAB = "leads_create"
+LEADS_COLS = {
+    "lead":   "leads_id",
+    "date":   "marketing date",     # when the lead was created
+    "setter": "mark_salesname",     # setter who created it
 }
-# created_by / salesreps_id must use the same ids as rep_id in the reps worksheet.
+APT_TAB = "apt_created"
+APT_COLS = {
+    "lead":   "leads_id",
+    "date":   "first_created",       # when the appointment was first set up
+    "setter": "apt salesname",       # setter who set it up
+    "status": "final_status",        # "Set up" or "Cancelled"
+    "order":  "orders salesrepsname",  # any value here = the customer placed an order
+}
+CANCELLED_VALUES = ["cancelled", "canceled"]   # status values that count as cancelled (any case)
 
-# Column headers in the "calls" worksheet (paste the GoTo call history export as-is).
-# If they don't match, the app lists the real headers so you can fix these.
+# ---- Phone calls tab --------------------------------------------------
+CALLS_TAB = "calls"   # paste the GoTo call history export here as-is
 GOTO_COLS = {
     "datetime": "Date",
     "person": "User",
@@ -41,7 +46,16 @@ GOTO_COLS = {
     "line": "Phone Number",   # set to None if you don't have a phone/line column
 }
 
-REFRESH_MINUTES = 10  # how often the dashboard re-reads the sheet
+# ---- Sales vs setters tab (not connected to your sheet yet) -----------
+SETTER_DEPT = "Appointment Setter"
+EXCLUDE_REP_IDS = ["1261"]
+SHEETS = {
+    "reps":         ("reps",         ["rep_id", "rep_name", "department"]),
+    "leads":        ("leads",        ["leads_id", "created_date", "created_by", "salesreps_id"]),
+    "appointments": ("appointments", ["apt_id", "leads_id", "created_date", "created_by", "salesreps_id"]),
+    "quotes":       ("quotes",       ["quote_id", "leads_id", "created_date"]),
+    "orders":       ("orders",       ["order_id", "leads_id", "created_date"]),
+}
 
 # =====================================================================
 # LOOK
@@ -116,12 +130,10 @@ DEMO_MODE = SHEET_CFG is None or secret("gcp_service_account") is None
 # DATA LOADING
 # =====================================================================
 @st.cache_data(ttl=REFRESH_MINUTES * 60, show_spinner="Reading the Google Sheet...")
-def load_data():
+def read_tabs():
+    """Every worksheet in the sheet as {title: DataFrame of text}."""
     if DEMO_MODE:
-        d = demo_crm()
-        d["calls_raw"] = None
-        d["loaded_at"] = dt.datetime.now()
-        return d
+        return demo_tabs(), dt.datetime.now()
     import gspread
     from google.oauth2.service_account import Credentials
 
@@ -129,32 +141,69 @@ def load_data():
         dict(secret("gcp_service_account")),
         scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
     book = gspread.authorize(creds).open_by_url(SHEET_CFG["url"])
-    names = {ws.title: ws for ws in book.worksheets()}
-
-    data = {}
-    for key, (ws_name, required) in SHEETS.items():
-        if ws_name not in names:
-            raise ValueError(f'The Google Sheet has no worksheet named "{ws_name}". '
-                             f"Worksheets found: {list(names)}")
-        rows = names[ws_name].get_all_values()
+    tabs = {}
+    for ws in book.worksheets():
+        rows = ws.get_all_values()
         if not rows:
-            raise ValueError(f'The "{ws_name}" worksheet is empty. Row 1 must hold the column headers.')
+            tabs[ws.title] = pd.DataFrame()
+            continue
         header = [h.strip() for h in rows[0]]
         df = pd.DataFrame(rows[1:], columns=header)
         df = df.loc[:, [h != "" for h in header]]
-        df = df[(df != "").any(axis=1)]                       # drop blank rows
-        if required:
-            missing = [c for c in required if c not in df.columns]
-            if missing:
-                raise ValueError(f'The "{ws_name}" worksheet is missing these column headers: {missing}. '
-                                 f"Headers found: {list(df.columns)}")
-            df = df[required]
-        data[key] = df
-    calls_raw = data.pop("calls")
-    d = clean(data)
-    d["calls_raw"] = calls_raw
-    d["loaded_at"] = dt.datetime.now()
-    return d
+        tabs[ws.title] = df[(df != "").any(axis=1)].reset_index(drop=True)
+    return tabs, dt.datetime.now()
+
+
+def missing_cols(df, needed):
+    return [c for c in needed if c not in df.columns]
+
+
+def text(s):
+    s = s.astype(str).str.strip()
+    return s.mask(s.str.lower().isin(["", "nan", "none", "null", "<na>"]), "")
+
+
+def to_dt(s):
+    return pd.to_datetime(text(s).replace("", None), errors="coerce", format="mixed")
+
+
+def setter_data(tabs):
+    """Returns (leads, apts) for the Setter performance tab, or raises ValueError."""
+    for tab, cols in ((LEADS_TAB, LEADS_COLS), (APT_TAB, APT_COLS)):
+        if tab not in tabs:
+            raise ValueError(f'There is no worksheet named "{tab}". Worksheets found: {list(tabs)}')
+        miss = missing_cols(tabs[tab], cols.values())
+        if miss:
+            raise ValueError(f'The "{tab}" worksheet is missing {miss}. Headers found: {list(tabs[tab].columns)}. '
+                             f"Fix the headers in the sheet or the names in app.py.")
+    l, a = tabs[LEADS_TAB], tabs[APT_TAB]
+    leads = pd.DataFrame({"lead": text(l[LEADS_COLS["lead"]]), "date": to_dt(l[LEADS_COLS["date"]]),
+                          "setter": text(l[LEADS_COLS["setter"]])})
+    status = text(a[APT_COLS["status"]])
+    apts = pd.DataFrame({
+        "lead": text(a[APT_COLS["lead"]]),
+        "date": to_dt(a[APT_COLS["date"]]),
+        "setter": text(a[APT_COLS["setter"]]),
+        "status": np.where(status.str.lower().isin(CANCELLED_VALUES), "Cancelled", "Active"),
+        "ordered": text(a[APT_COLS["order"]]) != "",
+    })
+    extra = [c for c in ("path", "path_detail") if c in a.columns]
+    for c in extra:
+        apts[c] = text(a[c])
+    leads = leads[(leads.setter != "") & leads.date.notna()]
+    apts = apts[(apts.setter != "") & apts.date.notna()]
+    return leads, apts
+
+
+def sales_crm(tabs):
+    """Tables for the Sales vs setters tab, or None if those worksheets aren't in the sheet."""
+    data = {}
+    for key, (ws, cols) in SHEETS.items():
+        if ws not in tabs or missing_cols(tabs[ws], cols):
+            return None
+        data[key] = tabs[ws][cols].copy()
+    return clean(data)
+
 
 
 def clean(d):
@@ -317,47 +366,67 @@ COUNTS = ["Leads", "Appointments", "Quotes", "Orders"]
 RATIOS = [("Apt / Leads", "Appointments", "Leads"), ("Order / Apt", "Orders", "Appointments")]
 
 
+def demo_tabs():
+    """Fake worksheets shaped like the real sheet."""
+    crm = demo_crm()
+    rng = np.random.default_rng(11)
+    reps = crm["reps"]
+    name_of = dict(zip(reps.rep_id, reps.rep_name))
+    setters = set(reps.loc[reps.department == SETTER_DEPT, "rep_id"])
+    l = crm["leads"][crm["leads"].created_by.isin(setters)]
+    leads_create = pd.DataFrame({"leads_id": l.leads_id, "marketing date": l.created_date.dt.strftime("%Y-%m-%d"),
+                                 "mark_salesname": l.created_by.map(name_of), "mbranch": "Appointment Setters"})
+    a = crm["appointments"][crm["appointments"].created_by.isin(setters)]
+    cancelled = rng.random(len(a)) < 0.18
+    ordered = a.leads_id.isin(crm["orders"].leads_id) & ~cancelled
+    apt_created = pd.DataFrame({
+        "leads_id": a.leads_id, "apt salesname": a.created_by.map(name_of),
+        "first_created": a.created_date.dt.strftime("%Y-%m-%d %H:%M"),
+        "final_status": np.where(cancelled, "Cancelled", "Set up"),
+        "path": np.where(cancelled, "created > cancelled", "created"),
+        "orders salesrepsname": np.where(ordered, a.salesreps_id.map(name_of), ""),
+    })
+    tabs = {LEADS_TAB: leads_create, APT_TAB: apt_created}
+    for key, (ws, cols) in SHEETS.items():
+        tabs[ws] = crm[key][cols].astype(str)
+    return tabs
+
+
+
+
 # =====================================================================
-# DATA
+# PAGE
 # =====================================================================
 try:
-    crm = load_data()
+    tabs, loaded_at = read_tabs()
 except Exception as err:
     st.error(f"Couldn't read the Google Sheet. {err}")
     st.caption("Check that the sheet is shared with the service account's email, and that the url in secrets is right.")
     st.stop()
-reps, leads, apts, quotes, orders = (crm[k] for k in ("reps", "leads", "appointments", "quotes", "orders"))
-name_of = dict(zip(reps.rep_id, reps.rep_name))
-setter_ids = set(reps.loc[reps.department == SETTER_DEPT, "rep_id"])
-sales_ids = set(reps.loc[reps.department != SETTER_DEPT, "rep_id"])
-
-# A lead is credited to whoever set its FIRST appointment; origin_rep = the sales rep who ran it.
-origin = (apts.sort_values("created_date").drop_duplicates("leads_id")
-          [["leads_id", "created_by", "salesreps_id"]]
-          .rename(columns={"created_by": "origin", "salesreps_id": "origin_rep"}))
-quotes_o = quotes.merge(origin, on="leads_id", how="inner")
-orders_o = orders.merge(origin, on="leads_id", how="inner")
 
 st.markdown('<div class="dash topbar"><h1>Appointment setting</h1>'
             f'<span>{"Demo data: add Google Sheet secrets to see real numbers" if DEMO_MODE else ""}</span></div>',
             unsafe_allow_html=True)
 r1, r2 = st.columns([5, 1])
-r1.caption(f"Data read from the sheet at {crm['loaded_at']:%b %d, %I:%M %p}. "
+r1.caption(f"Data read from the sheet at {loaded_at:%b %d, %I:%M %p}. "
            f"It refreshes every {REFRESH_MINUTES} minutes.")
 if r2.button("Refresh now", width="stretch"):
-    load_data.clear()
+    read_tabs.clear()
     st.rerun()
 
 tab_calls, tab_setters, tab_sales = st.tabs(["Phone calls", "Setter performance", "Sales vs setters"])
 
 # ---------------------------------------------------------------- TAB 1
 with tab_calls:
+    calls = None
     if DEMO_MODE:
-        calls = demo_goto([name_of[i] for i in sorted(setter_ids)])
+        calls = demo_goto(["Lisa Porras", "Fabio Davila", "Maya Chen", "Omar Reyes", "Jess Tran"])
+    elif CALLS_TAB not in tabs:
+        st.info(f'Add a worksheet named "{CALLS_TAB}" with the GoTo call history export to see call stats.')
     else:
-        calls = normalize_calls(crm["calls_raw"])
+        calls = normalize_calls(tabs[CALLS_TAB])
         if calls is not None and calls.dropna(subset=["datetime"]).empty:
-            st.info('The "calls" worksheet has no rows with a readable date yet.')
+            st.info(f'The "{CALLS_TAB}" worksheet has no rows with a readable date yet.')
             calls = None
 
     if calls is not None:
@@ -435,151 +504,199 @@ with tab_calls:
 
 # ---------------------------------------------------------------- TAB 2
 with tab_setters:
-    f1, f2 = st.columns([1, 2])
-    with f1:
-        s, e = date_picker("setter_range", MIN_DATE, min(dt.date.today(), MAX_DATE), MIN_DATE, MAX_DATE)
-    with f2:
-        setter_names = sorted(name_of[i] for i in setter_ids)
-        pick = st.multiselect("Setters", setter_names, default=setter_names, key="setter_pick")
-    chosen = {i for i in setter_ids if name_of[i] in pick}
+    try:
+        s_leads, s_apts = setter_data(tabs)
+    except ValueError as err:
+        st.error(str(err))
+        s_leads = None
 
-    L = in_range(leads, s, e);    L = L[L.created_by.isin(chosen)]
-    A = in_range(apts, s, e);     A = A[A.created_by.isin(chosen)]
-    Q = in_range(quotes_o, s, e); Q = Q[Q.origin.isin(chosen)]
-    O = in_range(orders_o, s, e); O = O[O.origin.isin(chosen)]
+    if s_leads is not None:
+        all_dates = pd.concat([s_leads.date, s_apts.date])
+        today = dt.date.today()
+        lo = min(all_dates.min().date(), MIN_DATE) if len(all_dates) else MIN_DATE
+        hi = max(all_dates.max().date(), today) if len(all_dates) else today
+        f1, f2 = st.columns([1, 2])
+        with f1:
+            s, e = date_picker("setter_range", lo, min(today, hi), lo, hi)
+        with f2:
+            names = sorted(set(s_leads.setter) | set(s_apts.setter))
+            pick = st.multiselect("Setters", names, default=names, key="setter_pick")
 
-    t = pd.DataFrame(index=sorted(chosen))
-    t["Leads"] = L.groupby("created_by").size()
-    t["Appointments"] = A.groupby("created_by").size()
-    t["Quotes"] = Q.groupby("origin").size()
-    t["Orders"] = O.groupby("origin").size()
-    t = t.reindex(columns=COUNTS).fillna(0).astype(int)
-    t.index = t.index.map(name_of)
-    t = with_total(t.sort_values("Appointments", ascending=False), COUNTS, RATIOS)
-    tot = t.loc["Total"]
+        Ls = in_range(s_leads, s, e, "date");  Ls = Ls[Ls.setter.isin(pick)]
+        As = in_range(s_apts, s, e, "date");   As = As[As.setter.isin(pick)]
 
-    left, right = st.columns([2, 1], gap="medium")
-    with left:
+        t = pd.DataFrame(index=pick)
+        t["Leads"] = Ls.groupby("setter").lead.nunique()
+        t["Appointments"] = As.groupby("setter").lead.nunique()
+        t["Active"] = As[As.status == "Active"].groupby("setter").lead.nunique()
+        t["Cancelled"] = As[As.status == "Cancelled"].groupby("setter").lead.nunique()
+        t["Orders"] = As[As.ordered].groupby("setter").lead.nunique()
+        cols = ["Leads", "Appointments", "Active", "Cancelled", "Orders"]
+        t = t.reindex(columns=cols).fillna(0).astype(int).sort_values("Appointments", ascending=False)
+        t = with_total(t, cols, [("Apt / Leads", "Appointments", "Leads"),
+                                 ("Cancel rate", "Cancelled", "Appointments"),
+                                 ("Order / Apt", "Orders", "Appointments")])
+        tot = t.loc["Total"]
+
+        kpi_strip([
+            ("Leads created", f"{int(tot.Leads):,}", INK),
+            ("Appointments set", f"{int(tot.Appointments):,}", BLUE),
+            ("Still active", f"{int(tot.Active):,}", "#6FA6F2"),
+            ("Cancelled", f"{int(tot.Cancelled):,}", "#AEB8C6"),
+            ("Orders placed", f"{int(tot.Orders):,}", ORANGE),
+        ])
+
+        left, right = st.columns([2, 1], gap="medium")
+        with left:
+            with st.container(border=True):
+                st.markdown("#### From lead to order")
+                steps = [("Leads created", tot.Leads, INK, ""),
+                         ("Appointments set", tot.Appointments, BLUE,
+                          f"{fmt_pct(tot['Apt / Leads'])} of leads"),
+                         ("Still active", tot.Active, "#6FA6F2",
+                          f"{fmt_pct(100 - tot['Cancel rate'] if pd.notna(tot['Cancel rate']) else np.nan)} kept"),
+                         ("Orders placed", tot.Orders, ORANGE,
+                          f"{fmt_pct(tot['Order / Apt'])} of appointments")]
+                fun = pd.DataFrame({"stage": [f"{a}   {d}".strip() for a, b, c, d in steps],
+                                    "value": [int(b) for a, b, c, d in steps],
+                                    "color": [c for a, b, c, d in steps]})
+                base = alt.Chart(fun).encode(y=alt.Y("stage:N", sort=None, title=None,
+                                                     axis=alt.Axis(labelFontSize=13, labelLimit=300)))
+                funnel = (base.mark_bar(cornerRadius=2, height=34).encode(
+                              x=alt.X("value:Q", title=None, axis=None), color=alt.Color("color:N", scale=None))
+                          + base.mark_text(align="left", dx=8, fontSize=18, fontWeight="bold", color=INK).encode(
+                              x="value:Q", text=alt.Text("value:Q", format=",")))
+                st.altair_chart(funnel.properties(height=230), width="stretch")
+        with right:
+            st.markdown(
+                f'<div class="dash hero"><span class="l">Apt / Leads</span>'
+                f'<span class="v">{fmt_pct(tot["Apt / Leads"])}</span>'
+                f'<span class="s">{int(tot.Appointments):,} appointments from {int(tot.Leads):,} leads</span></div>'
+                f'<div class="dash hero"><span class="l">Order / Apt</span>'
+                f'<span class="v" style="color:#F2A65E">{fmt_pct(tot["Order / Apt"])}</span>'
+                f'<span class="s">{int(tot.Orders):,} orders from {int(tot.Appointments):,} appointments · '
+                f'{fmt_pct(tot["Cancel rate"])} cancelled</span></div>',
+                unsafe_allow_html=True)
+
         with st.container(border=True):
-            st.markdown("#### From first call to order")
-            steps = [("Leads created", tot.Leads, ""),
-                     ("Appointments", tot.Appointments, f"{fmt_pct(pct([tot.Appointments], [tot.Leads])[0])} booked"),
-                     ("Quotes sent", tot.Quotes, f"{fmt_pct(pct([tot.Quotes], [tot.Appointments])[0])} quoted"),
-                     ("Orders", tot.Orders, f"{fmt_pct(pct([tot.Orders], [tot.Quotes])[0])} ordered")]
-            fun = pd.DataFrame({"stage": [f"{a}   {c}".strip() for a, b, c in steps],
-                                "value": [int(b) for a, b, c in steps],
-                                "color": [INK, BLUE, "#6FA6F2", ORANGE]})
-            base = alt.Chart(fun).encode(y=alt.Y("stage:N", sort=None, title=None,
-                                                 axis=alt.Axis(labelFontSize=13, labelLimit=260)))
-            funnel = (base.mark_bar(cornerRadius=2, height=34).encode(
-                          x=alt.X("value:Q", title=None, axis=None), color=alt.Color("color:N", scale=None))
-                      + base.mark_text(align="left", dx=8, fontSize=18, fontWeight="bold", color=INK).encode(
-                          x="value:Q", text=alt.Text("value:Q", format=",")))
-            st.altair_chart(funnel.properties(height=230), width="stretch")
-    with right:
-        st.markdown(
-            f'<div class="dash hero"><span class="l">Apt / Leads</span><span class="v">{fmt_pct(tot["Apt / Leads"])}</span>'
-            f'<span class="s">{int(tot.Appointments):,} appointments from {int(tot.Leads):,} leads</span></div>'
-            f'<div class="dash hero"><span class="l">Order / Apt</span>'
-            f'<span class="v" style="color:#F2A65E">{fmt_pct(tot["Order / Apt"])}</span>'
-            f'<span class="s">{int(tot.Orders):,} orders from {int(tot.Appointments):,} appointments</span></div>',
-            unsafe_allow_html=True)
+            st.markdown("#### By setter")
+            t.index.name = "Setter"
+            st.dataframe(t, height=38 * (len(t) + 1) + 4, column_config={
+                "Apt / Leads": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100),
+                "Cancel rate": st.column_config.NumberColumn(format="%.1f%%"),
+                "Order / Apt": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100),
+            })
 
-    with st.container(border=True):
-        st.markdown("#### By setter")
-        t.index.name = "Setter"
-        st.dataframe(t, height=38 * (len(t) + 1) + 4, column_config={
-            "Apt / Leads": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=60),
-            "Order / Apt": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=30),
-        })
+        with st.container(border=True):
+            h, m = st.columns([3, 2])
+            h.markdown("#### Per month")
+            metric = m.radio("Show", ["Leads", "Appointments", "Cancelled", "Orders"], index=1,
+                             horizontal=True, key="trend_metric", label_visibility="collapsed")
+            src = {"Leads": Ls, "Appointments": As, "Cancelled": As[As.status == "Cancelled"],
+                   "Orders": As[As.ordered]}[metric]
+            trend = src.groupby(src.date.dt.to_period("M")).lead.nunique().rename("count").reset_index()
+            trend["month"] = trend.date.dt.to_timestamp()
+            color = {"Orders": ORANGE, "Cancelled": "#8792A2", "Leads": INK}.get(metric, BLUE)
+            bars = alt.Chart(trend).mark_bar(color=color, cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+                x=alt.X("yearmonth(month):O", title=None, axis=alt.Axis(format="%b %y", labelAngle=0)),
+                y=alt.Y("count:Q", title=metric),
+                tooltip=[alt.Tooltip("yearmonth(month):O", title="Month", format="%b %Y"), "count"])
+            labels = bars.mark_text(dy=-8, fontSize=11, color=MUTED).encode(text="count:Q")
+            st.altair_chart((bars + labels).properties(height=260), width="stretch")
 
-    with st.container(border=True):
-        h, m = st.columns([3, 2])
-        h.markdown("#### Per month")
-        metric = m.radio("Show", ["Leads", "Appointments", "Orders"], index=1, horizontal=True,
-                         key="trend_metric", label_visibility="collapsed")
-        src = {"Leads": L, "Appointments": A, "Orders": O}[metric]
-        trend = src.groupby(src.created_date.dt.to_period("M")).size().rename("count").reset_index()
-        trend["month"] = trend.created_date.dt.to_timestamp()
-        col = alt.Chart(trend).mark_bar(color={"Orders": ORANGE}.get(metric, BLUE),
-                                        cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
-            x=alt.X("yearmonth(month):O", title=None, axis=alt.Axis(format="%b %y", labelAngle=0)),
-            y=alt.Y("count:Q", title=metric),
-            tooltip=[alt.Tooltip("yearmonth(month):O", title="Month", format="%b %Y"), "count"])
-        labels = col.mark_text(dy=-8, fontSize=11, color=MUTED).encode(text="count:Q")
-        st.altair_chart((col + labels).properties(height=260), width="stretch")
+        with st.expander(f"Appointment list ({len(As):,})"):
+            detail = As.sort_values("date", ascending=False).rename(columns={
+                "lead": "Lead", "date": "Set up on", "setter": "Setter", "status": "Status",
+                "ordered": "Ordered", "path": "Path", "path_detail": "Path detail"})
+            st.dataframe(detail, hide_index=True)
+            st.download_button("Download CSV", detail.to_csv(index=False).encode("utf-8-sig"),
+                               file_name=f"appointments_{s:%Y%m%d}_{e:%Y%m%d}.csv", mime="text/csv")
 
 # ---------------------------------------------------------------- TAB 3
 with tab_sales:
-    f1, f2 = st.columns([1, 2])
-    with f1:
-        s, e = date_picker("sales_range", MIN_DATE, min(dt.date.today(), MAX_DATE), MIN_DATE, MAX_DATE)
-    with f2:
-        sales_names = sorted(name_of[i] for i in sales_ids)
-        pick = st.multiselect("Sales reps", sales_names, default=sales_names, key="sales_pick")
-    chosen = {i for i in sales_ids if name_of[i] in pick}
-    Lr, Ar = in_range(leads, s, e), in_range(apts, s, e)
-    Qr, Or = in_range(quotes_o, s, e), in_range(orders_o, s, e)
+    crm = sales_crm(tabs)
+    if crm is None:
+        st.info("This tab isn't connected to your sheet yet. Tell me which worksheets hold the sales reps' "
+                "appointments, quotes and orders, and I'll point it at them.")
+    else:
+        reps, leads, apts, quotes, orders = (crm[k] for k in ("reps", "leads", "appointments", "quotes", "orders"))
+        name_of = dict(zip(reps.rep_id, reps.rep_name))
+        setter_ids = set(reps.loc[reps.department == SETTER_DEPT, "rep_id"])
+        sales_ids = set(reps.loc[reps.department != SETTER_DEPT, "rep_id"])
+        origin = (apts.sort_values("created_date").drop_duplicates("leads_id")
+                  [["leads_id", "created_by", "salesreps_id"]]
+                  .rename(columns={"created_by": "origin", "salesreps_id": "origin_rep"}))
+        quotes_o = quotes.merge(origin, on="leads_id", how="inner")
+        orders_o = orders.merge(origin, on="leads_id", how="inner")
+        f1, f2 = st.columns([1, 2])
+        with f1:
+            s, e = date_picker("sales_range", MIN_DATE, min(dt.date.today(), MAX_DATE), MIN_DATE, MAX_DATE)
+        with f2:
+            sales_names = sorted(name_of[i] for i in sales_ids)
+            pick = st.multiselect("Sales reps", sales_names, default=sales_names, key="sales_pick")
+        chosen = {i for i in sales_ids if name_of[i] in pick}
+        Lr, Ar = in_range(leads, s, e), in_range(apts, s, e)
+        Qr, Or = in_range(quotes_o, s, e), in_range(orders_o, s, e)
 
-    # What the sales rep generated themselves
-    own = pd.DataFrame(index=sorted(chosen))
-    own["Leads"] = Lr[Lr.created_by.isin(chosen)].groupby("created_by").size()
-    own["Appointments"] = Ar[Ar.created_by.isin(chosen)].groupby("created_by").size()
-    own["Quotes"] = Qr[Qr.origin.isin(chosen)].groupby("origin").size()
-    own["Orders"] = Or[Or.origin.isin(chosen)].groupby("origin").size()
+        # What the sales rep generated themselves
+        own = pd.DataFrame(index=sorted(chosen))
+        own["Leads"] = Lr[Lr.created_by.isin(chosen)].groupby("created_by").size()
+        own["Appointments"] = Ar[Ar.created_by.isin(chosen)].groupby("created_by").size()
+        own["Quotes"] = Qr[Qr.origin.isin(chosen)].groupby("origin").size()
+        own["Orders"] = Or[Or.origin.isin(chosen)].groupby("origin").size()
 
-    # What the setters handed to this sales rep
-    fromset = pd.DataFrame(index=sorted(chosen))
-    fromset["Leads"] = Lr[Lr.created_by.isin(setter_ids)].groupby("salesreps_id").size()
-    fromset["Appointments"] = Ar[Ar.created_by.isin(setter_ids)].groupby("salesreps_id").size()
-    fromset["Quotes"] = Qr[Qr.origin.isin(setter_ids)].groupby("origin_rep").size()
-    fromset["Orders"] = Or[Or.origin.isin(setter_ids)].groupby("origin_rep").size()
+        # What the setters handed to this sales rep
+        fromset = pd.DataFrame(index=sorted(chosen))
+        fromset["Leads"] = Lr[Lr.created_by.isin(setter_ids)].groupby("salesreps_id").size()
+        fromset["Appointments"] = Ar[Ar.created_by.isin(setter_ids)].groupby("salesreps_id").size()
+        fromset["Quotes"] = Qr[Qr.origin.isin(setter_ids)].groupby("origin_rep").size()
+        fromset["Orders"] = Or[Or.origin.isin(setter_ids)].groupby("origin_rep").size()
 
-    own = with_total(own.reindex(columns=COUNTS).fillna(0).astype(int), COUNTS, RATIOS)
-    fromset = with_total(fromset.reindex(columns=COUNTS).fillna(0).astype(int), COUNTS, RATIOS)
-    for df in (own, fromset):
-        df.index = df.index.map(lambda i: name_of.get(i, i))
+        own = with_total(own.reindex(columns=COUNTS).fillna(0).astype(int), COUNTS, RATIOS)
+        fromset = with_total(fromset.reindex(columns=COUNTS).fillna(0).astype(int), COUNTS, RATIOS)
+        for df in (own, fromset):
+            df.index = df.index.map(lambda i: name_of.get(i, i))
 
-    st.markdown(f"""
-    <div class="dash cmp">
-      <div><h3>Apt / Leads</h3><div class="row">
-        <div><div class="v">{fmt_pct(own.loc['Total', 'Apt / Leads'])}</div><div class="l">Sales reps’ own leads</div></div>
-        <div><div class="v blue">{fmt_pct(fromset.loc['Total', 'Apt / Leads'])}</div><div class="l">Leads from setters</div></div>
-      </div></div>
-      <div><h3>Order / Apt</h3><div class="row">
-        <div><div class="v">{fmt_pct(own.loc['Total', 'Order / Apt'])}</div><div class="l">Appointments they set</div></div>
-        <div><div class="v blue">{fmt_pct(fromset.loc['Total', 'Order / Apt'])}</div><div class="l">Appointments from setters</div></div>
-      </div></div>
-    </div>""", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="dash cmp">
+          <div><h3>Apt / Leads</h3><div class="row">
+            <div><div class="v">{fmt_pct(own.loc['Total', 'Apt / Leads'])}</div><div class="l">Sales reps’ own leads</div></div>
+            <div><div class="v blue">{fmt_pct(fromset.loc['Total', 'Apt / Leads'])}</div><div class="l">Leads from setters</div></div>
+          </div></div>
+          <div><h3>Order / Apt</h3><div class="row">
+            <div><div class="v">{fmt_pct(own.loc['Total', 'Order / Apt'])}</div><div class="l">Appointments they set</div></div>
+            <div><div class="v blue">{fmt_pct(fromset.loc['Total', 'Order / Apt'])}</div><div class="l">Appointments from setters</div></div>
+          </div></div>
+        </div>""", unsafe_allow_html=True)
 
-    def dumbbell(metric):
-        d = pd.DataFrame({"rep": own.index, "Own": own[metric].values,
-                          "From setters": fromset[metric].values})
-        d = d[d.rep != "Total"]
-        y = alt.Y("rep:N", sort=None, title=None, axis=alt.Axis(labelFontSize=13))
-        rule = alt.Chart(d).mark_rule(color="#AEB8C6", strokeWidth=2).encode(
-            y=y, x=alt.X("Own:Q", scale=alt.Scale(zero=False, padding=20), title="%"), x2="From setters:Q")
-        pts = alt.Chart(d.melt("rep", var_name="source", value_name="pct")).mark_circle(size=170, opacity=1).encode(
-            y=y, x="pct:Q",
-            color=alt.Color("source:N", title=None, scale=alt.Scale(domain=["Own", "From setters"], range=[INK, BLUE]),
-                            legend=alt.Legend(orient="top")),
-            tooltip=["rep", "source", alt.Tooltip("pct:Q", format=".1f")])
-        return (rule + pts).properties(height=max(200, 44 * len(d)))
+        def dumbbell(metric):
+            d = pd.DataFrame({"rep": own.index, "Own": own[metric].values,
+                              "From setters": fromset[metric].values})
+            d = d[d.rep != "Total"]
+            y = alt.Y("rep:N", sort=None, title=None, axis=alt.Axis(labelFontSize=13))
+            rule = alt.Chart(d).mark_rule(color="#AEB8C6", strokeWidth=2).encode(
+                y=y, x=alt.X("Own:Q", scale=alt.Scale(zero=False, padding=20), title="%"), x2="From setters:Q")
+            pts = alt.Chart(d.melt("rep", var_name="source", value_name="pct")).mark_circle(size=170, opacity=1).encode(
+                y=y, x="pct:Q",
+                color=alt.Color("source:N", title=None, scale=alt.Scale(domain=["Own", "From setters"], range=[INK, BLUE]),
+                                legend=alt.Legend(orient="top")),
+                tooltip=["rep", "source", alt.Tooltip("pct:Q", format=".1f")])
+            return (rule + pts).properties(height=max(200, 44 * len(d)))
 
-    left, right = st.columns(2, gap="medium")
-    with left:
+        left, right = st.columns(2, gap="medium")
+        with left:
+            with st.container(border=True):
+                st.markdown("#### Apt / Leads by sales rep")
+                st.altair_chart(dumbbell("Apt / Leads"), width="stretch")
+        with right:
+            with st.container(border=True):
+                st.markdown("#### Order / Apt by sales rep")
+                st.altair_chart(dumbbell("Order / Apt"), width="stretch")
+
         with st.container(border=True):
-            st.markdown("#### Apt / Leads by sales rep")
-            st.altair_chart(dumbbell("Apt / Leads"), width="stretch")
-    with right:
-        with st.container(border=True):
-            st.markdown("#### Order / Apt by sales rep")
-            st.altair_chart(dumbbell("Order / Apt"), width="stretch")
-
-    with st.container(border=True):
-        st.markdown("#### Side by side")
-        both = pd.concat({"Own": own, "From setters": fromset}, axis=1)
-        both.columns = [f"{a}: {b}" for a, b in both.columns]
-        both.index.name = "Sales rep"
-        st.dataframe(both, height=38 * (len(both) + 1) + 4,
-                     column_config={c: st.column_config.NumberColumn(format="%.1f%%") for c in both.columns if "/" in c})
+            st.markdown("#### Side by side")
+            both = pd.concat({"Own": own, "From setters": fromset}, axis=1)
+            both.columns = [f"{a}: {b}" for a, b in both.columns]
+            both.index.name = "Sales rep"
+            st.dataframe(both, height=38 * (len(both) + 1) + 4,
+                         column_config={c: st.column_config.NumberColumn(format="%.1f%%") for c in both.columns if "/" in c})
