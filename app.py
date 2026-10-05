@@ -30,16 +30,20 @@ LEADS_COLS = {
     "lead":   "leads_id",
     "date":   "marketing date",     # when the lead was created
     "setter": "mark_salesname",     # setter who created it
+    "branch": "mbranch",            # department of the person who created it
 }
 APT_TAB = "apt_created"
 APT_COLS = {
     "lead":   "leads_id",
     "date":   "first_created",       # when the appointment was first set up
     "setter": "apt salesname",       # setter who set it up
+    "branch": "apt branch",          # department of the person who set it up
     "status": "final_status",        # "Set up" or "Cancelled"
     "order":  "orders salesrepsname",  # any value here = the customer placed an order
 }
 CANCELLED_VALUES = ["cancelled", "canceled"]   # status values that count as cancelled (any case)
+# Only leads and appointments made by this department count on the Setter performance tab.
+SETTER_BRANCH = "Appointment Setters"
 
 # ---- Phone calls tab --------------------------------------------------
 CALLS_TAB = "calls"   # paste the GoTo call history export here as-is
@@ -191,6 +195,9 @@ def setter_data(tabs):
             raise ValueError(f'The "{tab}" worksheet is missing {miss}. Headers found: {list(tabs[tab].columns)}. '
                              f"Fix the headers in the sheet or the names in app.py.")
     l, a = tabs[LEADS_TAB], tabs[APT_TAB]
+    # Keep only rows made by the appointment setters department
+    l = l[text(l[LEADS_COLS["branch"]]).str.lower() == SETTER_BRANCH.lower()]
+    a = a[text(a[APT_COLS["branch"]]).str.lower() == SETTER_BRANCH.lower()]
     leads = pd.DataFrame({"lead": text(l[LEADS_COLS["lead"]]), "date": to_dt(l[LEADS_COLS["date"]]),
                           "setter": text(l[LEADS_COLS["setter"]])})
     status = text(a[APT_COLS["status"]])
@@ -394,7 +401,7 @@ def demo_tabs():
     cancelled = rng.random(len(a)) < 0.18
     ordered = a.leads_id.isin(crm["orders"].leads_id) & ~cancelled
     apt_created = pd.DataFrame({
-        "leads_id": a.leads_id, "apt salesname": a.created_by.map(name_of),
+        "leads_id": a.leads_id, "apt salesname": a.created_by.map(name_of), "apt branch": "Appointment Setters",
         "first_created": a.created_date.dt.strftime("%Y-%m-%d %H:%M"),
         "final_status": np.where(cancelled, "Cancelled", "Set up"),
         "path": np.where(cancelled, "created > cancelled", "created"),
@@ -539,23 +546,24 @@ with tab_setters:
         Ls = in_range(s_leads, s, e, "date");  Ls = Ls[Ls.setter.isin(pick)]
         As = in_range(s_apts, s, e, "date");   As = As[As.setter.isin(pick)]
 
+        # Appointments = still active (not cancelled). Cancelled ones are counted separately
+        # and are NOT included in Appointments or in the ratios.
+        active = As[As.status == "Active"]
         t = pd.DataFrame(index=pick)
         t["Leads"] = Ls.groupby("setter").lead.nunique()
-        t["Appointments"] = As.groupby("setter").lead.nunique()
-        t["Active"] = As[As.status == "Active"].groupby("setter").lead.nunique()
+        t["Appointments"] = active.groupby("setter").lead.nunique()
         t["Cancelled"] = As[As.status == "Cancelled"].groupby("setter").lead.nunique()
         t["Orders"] = As[As.ordered].groupby("setter").lead.nunique()
-        cols = ["Leads", "Appointments", "Active", "Cancelled", "Orders"]
+        cols = ["Leads", "Appointments", "Cancelled", "Orders"]
         t = t.reindex(columns=cols).fillna(0).astype(int).sort_values("Appointments", ascending=False)
         t = with_total(t, cols, [("Apt / Leads", "Appointments", "Leads"),
-                                 ("Cancel rate", "Cancelled", "Appointments"),
                                  ("Order / Apt", "Orders", "Appointments")])
+        t["Cancel rate"] = pct(t["Cancelled"], t["Appointments"] + t["Cancelled"])
         tot = t.loc["Total"]
 
         kpi_strip([
             ("Leads created", f"{int(tot.Leads):,}", INK),
-            ("Appointments set", f"{int(tot.Appointments):,}", BLUE),
-            ("Still active", f"{int(tot.Active):,}", "#6FA6F2"),
+            ("Appointments", f"{int(tot.Appointments):,}", BLUE),
             ("Cancelled", f"{int(tot.Cancelled):,}", "#AEB8C6"),
             ("Orders placed", f"{int(tot.Orders):,}", ORANGE),
         ])
@@ -565,31 +573,28 @@ with tab_setters:
             with st.container(border=True):
                 st.markdown("#### From lead to order")
                 steps = [("Leads created", tot.Leads, INK, ""),
-                         ("Appointments set", tot.Appointments, BLUE,
-                          f"{fmt_pct(tot['Apt / Leads'])} of leads"),
-                         ("Still active", tot.Active, "#6FA6F2",
-                          f"{fmt_pct(100 - tot['Cancel rate'] if pd.notna(tot['Cancel rate']) else np.nan)} kept"),
-                         ("Orders placed", tot.Orders, ORANGE,
-                          f"{fmt_pct(tot['Order / Apt'])} of appointments")]
+                         ("Appointments", tot.Appointments, BLUE, f"{fmt_pct(tot['Apt / Leads'])} of leads"),
+                         ("Orders placed", tot.Orders, ORANGE, f"{fmt_pct(tot['Order / Apt'])} of appointments")]
                 fun = pd.DataFrame({"stage": [f"{a}   {d}".strip() for a, b, c, d in steps],
                                     "value": [int(b) for a, b, c, d in steps],
                                     "color": [c for a, b, c, d in steps]})
                 base = alt.Chart(fun).encode(y=alt.Y("stage:N", sort=None, title=None,
                                                      axis=alt.Axis(labelFontSize=13, labelLimit=300)))
-                funnel = (base.mark_bar(cornerRadius=2, height=34).encode(
+                funnel = (base.mark_bar(cornerRadius=2, height=40).encode(
                               x=alt.X("value:Q", title=None, axis=None), color=alt.Color("color:N", scale=None))
                           + base.mark_text(align="left", dx=8, fontSize=18, fontWeight="bold", color=INK).encode(
                               x="value:Q", text=alt.Text("value:Q", format=",")))
-                st.altair_chart(funnel.properties(height=230), width="stretch")
+                st.altair_chart(funnel.properties(height=200), width="stretch")
+                st.caption(f"{int(tot.Cancelled):,} cancelled appointments are left out of Appointments "
+                           f"and the ratios ({fmt_pct(tot['Cancel rate'])} of everything booked).")
         with right:
             st.markdown(
                 f'<div class="dash hero"><span class="l">Apt / Leads</span>'
                 f'<span class="v">{fmt_pct(tot["Apt / Leads"])}</span>'
-                f'<span class="s">{int(tot.Appointments):,} appointments from {int(tot.Leads):,} leads</span></div>'
+                f'<span class="s">{int(tot.Appointments):,} appointments ÷ {int(tot.Leads):,} leads</span></div>'
                 f'<div class="dash hero"><span class="l">Order / Apt</span>'
                 f'<span class="v" style="color:#F2A65E">{fmt_pct(tot["Order / Apt"])}</span>'
-                f'<span class="s">{int(tot.Orders):,} orders from {int(tot.Appointments):,} appointments · '
-                f'{fmt_pct(tot["Cancel rate"])} cancelled</span></div>',
+                f'<span class="s">{int(tot.Orders):,} orders ÷ {int(tot.Appointments):,} appointments</span></div>',
                 unsafe_allow_html=True)
 
         with st.container(border=True):
@@ -599,14 +604,14 @@ with tab_setters:
                 "Apt / Leads": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100),
                 "Cancel rate": st.column_config.NumberColumn(format="%.1f%%"),
                 "Order / Apt": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100),
-            })
+            }, column_order=["Leads", "Appointments", "Cancelled", "Orders", "Apt / Leads", "Order / Apt", "Cancel rate"])
 
         with st.container(border=True):
             h, m = st.columns([3, 2])
             h.markdown("#### Per month")
             metric = m.radio("Show", ["Leads", "Appointments", "Cancelled", "Orders"], index=1,
                              horizontal=True, key="trend_metric", label_visibility="collapsed")
-            src = {"Leads": Ls, "Appointments": As, "Cancelled": As[As.status == "Cancelled"],
+            src = {"Leads": Ls, "Appointments": As[As.status == "Active"], "Cancelled": As[As.status == "Cancelled"],
                    "Orders": As[As.ordered]}[metric]
             trend = src.groupby(src.date.dt.to_period("M")).lead.nunique().rename("count").reset_index()
             trend["month"] = trend.date.dt.to_timestamp()
