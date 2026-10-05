@@ -225,7 +225,8 @@ def setter_data(tabs):
 
 
 def company_data(tabs):
-    """Returns (leads, apts) from the all company tab, each with person and branch, or raises ValueError."""
+    """One row per lead from the all company tab. Each lead belongs to the person who created it
+    (mark_salesname / mbranch); its appointment, cancellation and order are counted for that person."""
     if ALL_TAB not in tabs:
         raise ValueError(f'There is no worksheet named "{ALL_TAB}". Worksheets found: {list(tabs)}')
     d = tabs[ALL_TAB]
@@ -234,18 +235,22 @@ def company_data(tabs):
         raise ValueError(f'The "{ALL_TAB}" worksheet is missing {miss}. Headers found: {list(d.columns)}. '
                          f"Fix the headers in the sheet or the names in app.py.")
     c = ALL_COLS
-    leads = pd.DataFrame({"lead": text(d[c["lead"]]), "date": to_dt(d[c["lead_date"]]),
-                          "person": text(d[c["lead_by"]]), "branch": text(d[c["lead_branch"]])})
     status = text(d[c["status"]])
-    apts = pd.DataFrame({
-        "lead": text(d[c["lead"]]), "date": to_dt(d[c["apt_date"]]),
-        "person": text(d[c["apt_by"]]), "branch": text(d[c["apt_branch"]]),
-        "status": np.where(status.str.lower().isin(CANCELLED_VALUES), "Cancelled", "Active"),
+    has_apt = (text(d[c["apt_by"]]) != "") | (status != "")
+    cancelled = status.str.lower().isin(CANCELLED_VALUES)
+    rows = pd.DataFrame({
+        "lead": text(d[c["lead"]]),
+        "date": to_dt(d[c["lead_date"]]),
+        "person": text(d[c["lead_by"]]),
+        "branch": text(d[c["lead_branch"]]),
+        "active": has_apt & ~cancelled,
+        "cancelled": has_apt & cancelled,
         "ordered": text(d[c["order"]]) != "",
     })
-    leads = leads[(leads.person != "") & leads.date.notna()]
-    apts = apts[(apts.person != "") & apts.date.notna()]
-    return leads, apts
+    no_owner = int((rows.person == "").sum())
+    rows = rows[(rows.person != "") & rows.date.notna()]
+    rows = rows.drop_duplicates("lead", keep="last")       # one row per lead
+    return rows, no_owner
 
 
 
@@ -673,54 +678,49 @@ with tab_setters:
 # ---------------------------------------------------------------- TAB 3
 with tab_sales:
     try:
-        c_leads, c_apts = company_data(tabs)
+        c_rows, no_owner = company_data(tabs)
     except ValueError as err:
         st.error(str(err))
-        c_leads = None
+        c_rows = None
 
-    if c_leads is not None:
-        all_dates = pd.concat([c_leads.date, c_apts.date])
+    if c_rows is not None:
+        all_dates = c_rows.date
         today = dt.date.today()
         lo = min(all_dates.min().date(), MIN_DATE) if len(all_dates) else MIN_DATE
         hi = max(all_dates.max().date(), today) if len(all_dates) else today
         is_setter_branch = lambda b: b.str.lower() == SETTER_BRANCH.lower()
-        sales_branches = sorted((set(c_leads.branch) | set(c_apts.branch)) - {"", SETTER_BRANCH})
+        sales_branches = sorted(set(c_rows.branch) - {"", SETTER_BRANCH})
         f1, f2 = st.columns([1, 2])
         with f1:
             s, e = date_picker("sales_range", lo, min(today, hi), lo, hi)
         with f2:
             pick = st.multiselect("Branches", sales_branches, default=sales_branches, key="sales_branches")
 
-        Lc = in_range(c_leads, s, e, "date")
-        Ac = in_range(c_apts, s, e, "date")
+        R = in_range(c_rows, s, e, "date")     # leads created in the date range
 
-        def metrics(Ld, Ad, by=None):
-            """Leads, active appointments, cancelled, orders and ratios, overall or per `by` column."""
-            act, can, odr = Ad[Ad.status == "Active"], Ad[Ad.status == "Cancelled"], Ad[Ad.ordered]
+        def metrics(D, by=None):
+            """Leads, and how many of those leads have an active appointment, a cancelled one, an order."""
             if by is None:
-                m = pd.Series({"Leads": Ld.lead.nunique(), "Appointments": act.lead.nunique(),
-                               "Cancelled": can.lead.nunique(), "Orders": odr.lead.nunique()}, dtype=float)
+                m = pd.Series({"Leads": len(D), "Appointments": D.active.sum(),
+                               "Cancelled": D.cancelled.sum(), "Orders": D.ordered.sum()}, dtype=float)
                 m["Apt / Leads"] = m.Appointments / m.Leads * 100 if m.Leads else np.nan
                 m["Order / Leads"] = m.Orders / m.Leads * 100 if m.Leads else np.nan
                 return m
-            m = pd.DataFrame({"Leads": Ld.groupby(by).lead.nunique(),
-                              "Appointments": act.groupby(by).lead.nunique(),
-                              "Cancelled": can.groupby(by).lead.nunique(),
-                              "Orders": odr.groupby(by).lead.nunique()}).fillna(0).astype(int)
+            g = D.groupby(by)
+            m = pd.DataFrame({"Leads": g.size(), "Appointments": g.active.sum(),
+                              "Cancelled": g.cancelled.sum(), "Orders": g.ordered.sum()}).astype(int)
             m["Apt / Leads"] = pct(m.Appointments, m.Leads)
             m["Order / Leads"] = pct(m.Orders, m.Leads)
             return m
 
-        # Benchmark: the appointment setters department
-        setters = metrics(Lc[is_setter_branch(Lc.branch)], Ac[is_setter_branch(Ac.branch)])
+        # Benchmark: leads created by the appointment setters department
+        setters = metrics(R[is_setter_branch(R.branch)])
 
-        # Sales reps: everyone not in the setters department, in the chosen branches
-        Ls = Lc[Lc.branch.isin(pick)]
-        As = Ac[Ac.branch.isin(pick)]
-        sales_tot = metrics(Ls, As)
-        t = metrics(Ls, As, by="person")
-        home = pd.concat([Ls[["person", "branch"]], As[["person", "branch"]]])
-        t.insert(0, "Branch", home.groupby("person").branch.agg(lambda b: b.mode().iat[0]).reindex(t.index))
+        # Sales reps: leads created by everyone else, in the chosen branches
+        Rs = R[R.branch.isin(pick)]
+        sales_tot = metrics(Rs)
+        t = metrics(Rs, by="person")
+        t.insert(0, "Branch", Rs.groupby("person").branch.agg(lambda b: b.mode().iat[0]).reindex(t.index))
         t["Apt / Leads vs setters"] = t["Apt / Leads"] - setters["Apt / Leads"]
         t["Order / Leads vs setters"] = t["Order / Leads"] - setters["Order / Leads"]
         t = t.sort_values(["Orders", "Appointments", "Leads"], ascending=False)
@@ -749,6 +749,9 @@ with tab_sales:
 
         with st.container(border=True):
             st.markdown("#### By sales rep")
+            st.caption(f"Each row in “{ALL_TAB}” is one lead, counted for the person who created it ({ALL_COLS['lead_by']}). "
+                       f"Appointments, cancellations and orders are of those leads. "
+                       f"{no_owner:,} rows with no creator are left out.")
             st.caption(f"Sorted by orders. “vs setters” = the rep’s rate minus the appointment setters’ rate "
                        f"(Apt / Leads {fmt_pct(setters['Apt / Leads'])}, Order / Leads {fmt_pct(setters['Order / Leads'])}), "
                        f"in percentage points. Positive = better than the setters.")
