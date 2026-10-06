@@ -571,9 +571,11 @@ with tab_calls:
         tbl["Avg call"] = tbl["Talk time"] / len_t.replace(0, np.nan)
         tbl = tbl.sort_values("Avg calls / day", ascending=False)
 
+        ROW1_H = max(420, 38 * (len(tbl) + 2) + 150)   # chart card and table card get the same height
+        ROW2_H = 430
         left, right = st.columns([2, 3], gap="medium")
         with left:
-            with st.container(border=True):
+            with st.container(border=True, height=ROW1_H):
                 st.markdown("#### Calls by person (chart)")
                 # One bar per person: Inbound + Outbound (connected calls), same numbers as the table
                 pb = talked.groupby(["person", "direction"]).size().rename("calls").reset_index()
@@ -590,10 +592,10 @@ with tab_calls:
                 bar_labels = alt.Chart(tot_pb).mark_text(align="left", dx=5, fontSize=12, fontWeight="bold",
                                                          color=INK).encode(
                     y=y, x="total:Q", text=alt.Text("total:Q", format=","))
-                st.altair_chart((bar + bar_labels).properties(height=38 * len(tbl) + 40), width="stretch")
+                st.altair_chart((bar + bar_labels).properties(height=ROW1_H - 190), width="stretch")
                 st.caption("Bar = Total calls in the table (blue Inbound + orange Outbound). Hover for each part.")
         with right:
-            with st.container(border=True):
+            with st.container(border=True, height=ROW1_H):
                 st.markdown("#### Calls by person (table)")
                 st.caption("Inbound = answered inbound calls, Outbound = connected outbound calls. Missed calls are only in "
                            "the two missed columns and are not in Total calls, Avg calls / day, talk time or Avg call.")
@@ -614,7 +616,7 @@ with tab_calls:
         DIRS, DIR_COLORS = ["Inbound", "Outbound"], [BLUE, ORANGE]
         left, right = st.columns(2, gap="medium")
         with left:
-            with st.container(border=True):
+            with st.container(border=True, height=ROW2_H):
                 st.markdown("#### Average calls by weekday")
                 WEEK = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
                 days_per_wd = talked.groupby("weekday").date.nunique()          # e.g. how many Mondays had calls
@@ -634,11 +636,11 @@ with tab_calls:
                              alt.Tooltip("days:Q", title="Days")])
                     + alt.Chart(wd_tot).mark_text(dy=-8, fontWeight="bold", color=INK).encode(
                         x=x, y="sum:Q", text=alt.Text("sum:Q", format=",.0f"))
-                ).properties(height=260), width="stretch")
+                ).properties(height=270), width="stretch")
                 st.caption("Each bar = average connected calls on that weekday "
                            "(e.g. all Monday calls ÷ number of Mondays with calls).")
         with right:
-            with st.container(border=True):
+            with st.container(border=True, height=ROW2_H):
                 st.markdown("#### Calls by hour of day")
                 hourly = talked.groupby(["hour", "direction"]).size().rename("calls").reset_index()
                 st.altair_chart(alt.Chart(hourly).mark_bar().encode(
@@ -647,7 +649,8 @@ with tab_calls:
                     color=alt.Color("direction:N", title=None, legend=alt.Legend(orient="top"),
                                     scale=alt.Scale(domain=DIRS, range=DIR_COLORS)),
                     tooltip=["hour", alt.Tooltip("direction:N", title="Direction"), "calls"],
-                ).properties(height=260), width="stretch")
+                ).properties(height=270), width="stretch")
+                st.caption("Each bar = connected calls that started in that hour (8 = 8:00–8:59), all days added up.")
 
         with st.container(border=True):
             st.markdown("#### Missed calls by hour of day")
@@ -666,7 +669,7 @@ with tab_calls:
                     color=alt.Color("type:N", title=None, legend=alt.Legend(orient="top", labelLimit=320),
                                     scale=alt.Scale(domain=["Customer called in, not answered",
                                                             "We called out, customer didn't answer"],
-                                                    range=["#5A6474", "#AEB8C6"])),
+                                                    range=["#E5484D", "#FFB224"])),
                     tooltip=[alt.Tooltip("hour:O", title="Hour"), alt.Tooltip("type:N", title="Type"),
                              alt.Tooltip("missed:Q", title="Missed calls")])
                 labels = alt.Chart(totals).mark_text(dy=-8, fontSize=12, fontWeight="bold", color=INK).encode(
