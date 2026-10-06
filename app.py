@@ -198,6 +198,9 @@ def setter_data(tabs):
     for tab, cols in ((LEADS_TAB, LEADS_COLS), (APT_TAB, APT_COLS)):
         if tab not in tabs:
             raise ValueError(f'There is no worksheet named "{tab}". Worksheets found: {list(tabs)}')
+        if len(tabs[tab].columns) == 0:
+            raise ValueError(f'The "{tab}" worksheet is empty. Re-run the notebook cell that writes it, '
+                             f'then click Refresh now.')
         miss = missing_cols(tabs[tab], cols.values())
         if miss:
             raise ValueError(f'The "{tab}" worksheet is missing {miss}. Headers found: {list(tabs[tab].columns)}. '
@@ -230,6 +233,9 @@ def company_data(tabs):
     if ALL_TAB not in tabs:
         raise ValueError(f'There is no worksheet named "{ALL_TAB}". Worksheets found: {list(tabs)}')
     d = tabs[ALL_TAB]
+    if d.empty and len(d.columns) == 0:
+        raise ValueError(f'The "{ALL_TAB}" worksheet is empty. Re-run the notebook cell that writes it, '
+                         f'then click Refresh now.')
     miss = missing_cols(d, ALL_COLS.values())
     if miss:
         raise ValueError(f'The "{ALL_TAB}" worksheet is missing {miss}. Headers found: {list(d.columns)}. '
@@ -578,11 +584,12 @@ with tab_setters:
     if s_leads is not None:
         all_dates = pd.concat([s_leads.date, s_apts.date])
         today = dt.date.today()
-        lo = min(all_dates.min().date(), MIN_DATE) if len(all_dates) else MIN_DATE
-        hi = max(all_dates.max().date(), today) if len(all_dates) else today
+        # Date range = first to last date in the Google Sheet
+        lo = all_dates.min().date() if len(all_dates) else today
+        hi = all_dates.max().date() if len(all_dates) else today
         f1, f2 = st.columns([1, 2])
         with f1:
-            s, e = date_picker("setter_range", lo, min(today, hi), lo, hi)
+            s, e = date_picker(f"setter_range_{lo}_{hi}", lo, hi, lo, hi)
         with f2:
             names = sorted(set(s_leads.setter) | set(s_apts.setter))
             pick = st.multiselect("Setters", names, default=names, key="setter_pick")
@@ -686,13 +693,14 @@ with tab_sales:
     if c_rows is not None:
         all_dates = c_rows.date
         today = dt.date.today()
-        lo = min(all_dates.min().date(), MIN_DATE) if len(all_dates) else MIN_DATE
-        hi = max(all_dates.max().date(), today) if len(all_dates) else today
+        # Date range = first to last date in the Google Sheet
+        lo = all_dates.min().date() if len(all_dates) else today
+        hi = all_dates.max().date() if len(all_dates) else today
         is_setter_branch = lambda b: b.str.lower() == SETTER_BRANCH.lower()
         sales_branches = sorted(set(c_rows.branch) - {"", SETTER_BRANCH})
         f1, f2 = st.columns([1, 2])
         with f1:
-            s, e = date_picker("sales_range", lo, min(today, hi), lo, hi)
+            s, e = date_picker(f"sales_range_{lo}_{hi}", lo, hi, lo, hi)
         with f2:
             pick = st.multiselect("Branches", sales_branches, default=sales_branches, key="sales_branches")
 
