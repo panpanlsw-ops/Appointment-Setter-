@@ -567,7 +567,29 @@ with tab_calls:
         tbl = tbl.sort_values("Avg calls / day", ascending=False)
 
         with st.container(border=True):
-            st.markdown("#### Calls by person")
+            st.markdown("#### Calls by person (chart)")
+            parts = ["Inbound answered", "Inbound missed", "Outbound connected", "Outbound no answer"]
+            pc = c.assign(part=np.select(
+                [(c.direction == "Inbound") & ~c.missed, c.direction == "Inbound", ~c.missed],
+                parts[:3], parts[3]))
+            bars = pc.groupby(["person", "part"]).size().rename("calls").reset_index()
+            bars["order"] = bars.part.map({k: i for i, k in enumerate(parts)})
+            totals = pc.groupby("person").size().rename("total").reset_index()
+            chart = alt.Chart(bars).mark_bar().encode(
+                y=alt.Y("person:N", sort=list(tbl.index), title=None, axis=alt.Axis(labelFontSize=13)),
+                x=alt.X("calls:Q", title="Calls"),
+                color=alt.Color("part:N", title=None, sort=parts, legend=alt.Legend(orient="top"),
+                                scale=alt.Scale(domain=parts, range=[BLUE, "#9DBCEB", ORANGE, "#F5CFA8"])),
+                order=alt.Order("order:Q"),
+                tooltip=["person", alt.Tooltip("part:N", title="Type"), "calls"])
+            labels = alt.Chart(totals).mark_text(align="left", dx=6, fontSize=12, fontWeight="bold", color=INK).encode(
+                y=alt.Y("person:N", sort=list(tbl.index)), x="total:Q", text=alt.Text("total:Q", format=","))
+            st.altair_chart((chart + labels).properties(height=max(220, 40 * len(tbl))), width="stretch")
+            st.caption("Dark blue + light blue = all inbound calls; orange + light orange = all outbound calls. "
+                       "The bars use the same numbers as the table below.")
+
+        with st.container(border=True):
+            st.markdown("#### Calls by person (table)")
             st.caption("Inbound and Outbound are all calls in that direction; the missed / no-answer columns are the part of them that didn't connect.")
             show = tbl.copy()
             tot = show.drop(columns=["Avg call", "Avg calls / day"]).sum()
