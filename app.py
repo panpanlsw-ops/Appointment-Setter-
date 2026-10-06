@@ -46,14 +46,19 @@ CANCELLED_VALUES = ["cancelled", "canceled"]   # status values that count as can
 SETTER_BRANCH = "Appointment Setters"
 
 # ---- Phone calls tab --------------------------------------------------
-CALLS_TAB = "calls"   # paste the GoTo call history export here as-is
-GOTO_COLS = {
-    "datetime": "Date",
-    "person": "User",
-    "direction": "Direction",
-    "duration": "Duration",
-    "line": "Phone Number",   # set to None if you don't have a phone/line column
+CALLS_TAB = "calls"   # the appointment setters' GoTo calls (apt_call_res from the notebook)
+CALL_COLS = {
+    "date":      "Call Date",
+    "time":      "Call Time",
+    "hour":      "Hour",
+    "duration":  "Duration [Milliseconds]",
+    "direction": "Direction",               # Inbound / Outbound / Internal
+    "result":    "Call Result",
+    "person":    "participant_name",
 }
+# Call results that count as missed (customer not reached / caller not answered)
+MISSED_RESULTS = ["Missed Call", "Sent to voicemail", "Hung up (in queue)",
+                  "Hung up (on hold)", "Hung up (parked)"]
 
 # ---- Sales vs setters tab ---------------------------------------------
 ALL_TAB = "all company"
@@ -246,7 +251,10 @@ def company_data(tabs):
     cancelled = status.str.lower().isin(CANCELLED_VALUES)
     rows = pd.DataFrame({
         "lead": text(d[c["lead"]]),
-        "date": to_dt(d[c["lead_date"]]),
+        "date": to_dt(d[c["lead_date"]]),          # lead date (marketing date)
+        # appointment date: first_created, or last_date when first_created is empty (e.g. cancelled only)
+        "apt_date": to_dt(d[c["apt_date"]]).fillna(to_dt(d["last_date"]) if "last_date" in d.columns
+                                                   else pd.Series(pd.NaT, index=d.index)),
         "person": text(d[c["lead_by"]]),
         "branch": text(d[c["lead_branch"]]),
         "active": has_apt & ~cancelled,
@@ -254,8 +262,9 @@ def company_data(tabs):
         "ordered": text(d[c["order"]]) != "",
     })
     no_owner = int((rows.person == "").sum())
-    rows = rows[rows.date.notna()]
-    rows = rows.drop_duplicates("lead", keep="last")       # one row per lead
+    # Orders have no date of their own: use the appointment date, or the lead date if no appointment
+    rows["order_date"] = rows.apt_date.fillna(rows.date)
+    rows = rows[rows.date.notna() | rows.apt_date.notna()]
     return rows, no_owner
 
 
@@ -306,17 +315,23 @@ def demo_crm():
     return clean({"reps": reps, "leads": leads, "appointments": apts, "quotes": quotes, "orders": orders})
 
 
-def demo_goto(names):
+def demo_calls(names):
+    """Fake call log shaped like the calls worksheet."""
     rng = np.random.default_rng(3)
-    today = dt.date.today()
-    start = pd.Timestamp(today.replace(day=1))
-    n = 1800
+    n = 6000
+    day = pd.Timestamp("2026-08-01") + pd.to_timedelta(rng.integers(0, 66, n), unit="D")
+    hour = rng.choice(range(7, 18), n)
+    direction = rng.choice(["Outbound", "Inbound", "Internal"], n, p=[0.63, 0.36, 0.01])
+    result = np.where(direction == "Outbound",
+                      rng.choice(["Ended successfully", "Missed Call"], n, p=[0.87, 0.13]),
+                      rng.choice(["Dial plan call ended", "Ended successfully", "Sent to voicemail",
+                                  "Hung up (on hold)"], n, p=[0.9, 0.04, 0.04, 0.02]))
+    secs = np.where(result == "Missed Call", rng.integers(1, 20, n), rng.gamma(2, 90, n).astype(int) + 5)
     return pd.DataFrame({
-        "datetime": start + pd.to_timedelta(rng.integers(0, max((today - start.date()).days, 1) * 86400, n), unit="s"),
-        "person": rng.choice(names, n),
-        "direction": rng.choice(["Inbound", "Outbound"], n, p=[0.45, 0.55]),
-        "duration_sec": rng.gamma(2, 110, n).round(),
-        "line": rng.choice(["Main line", "Direct line"], n),
+        "Call Date": day.strftime("%Y-%m-%d"),
+        "Call Time": [f"{h:02d}:{m:02d}:{x:02d}" for h, m, x in zip(hour, rng.integers(0, 60, n), rng.integers(0, 60, n))],
+        "Hour": hour, "Duration [Milliseconds]": secs * 1000, "Direction": direction,
+        "Call Result": result, "participant_name": rng.choice(names, n),
     })
 
 
@@ -345,20 +360,24 @@ def to_seconds(x):
 
 
 def normalize_calls(raw):
-    missing = [v for v in GOTO_COLS.values() if v and v not in raw.columns]
+    """Clean call log, or raises ValueError if columns are missing."""
+    missing = [v for v in CALL_COLS.values() if v not in raw.columns]
     if missing:
-        st.error(f'The "calls" worksheet is missing these column headers: {missing}. '
-                 f"Update GOTO_COLS in app.py. Headers found: {list(raw.columns)}")
-        return None
-    direction = raw[GOTO_COLS["direction"]].astype(str).str.strip().str.lower()
-    return pd.DataFrame({
-        "datetime": pd.to_datetime(raw[GOTO_COLS["datetime"]], errors="coerce", format="mixed"),
-        "person": raw[GOTO_COLS["person"]].astype(str).str.strip(),
-        "direction": np.select([direction.str.startswith("in"), direction.str.startswith("out")],
-                               ["Inbound", "Outbound"], "Other"),
-        "duration_sec": raw[GOTO_COLS["duration"]].map(to_seconds),
-        "line": raw[GOTO_COLS["line"]].astype(str) if GOTO_COLS.get("line") else "All",
+        raise ValueError(f'The "{CALLS_TAB}" worksheet is missing {missing}. '
+                         f"Headers found: {list(raw.columns)}. Fix the headers or CALL_COLS in app.py.")
+    c = CALL_COLS
+    result = text(raw[c["result"]])
+    calls = pd.DataFrame({
+        "datetime": to_dt(text(raw[c["date"]]) + " " + text(raw[c["time"]])),
+        "person": text(raw[c["person"]]),
+        "direction": text(raw[c["direction"]]).str.title(),
+        "result": result,
+        "missed": result.isin(MISSED_RESULTS),
+        "duration_sec": pd.to_numeric(raw[c["duration"]], errors="coerce").fillna(0) / 1000,
+        "hour": pd.to_numeric(raw[c["hour"]], errors="coerce"),
     })
+    calls["date"] = calls.datetime.dt.normalize()
+    return calls[calls.datetime.notna() & (calls.person != "")], raw
 
 
 # =====================================================================
@@ -489,56 +508,63 @@ tab_calls, tab_setters, tab_sales = st.tabs(["Phone calls", "Setter performance"
 
 # ---------------------------------------------------------------- TAB 1
 with tab_calls:
-    calls = None
-    if DEMO_MODE:
-        calls = demo_goto(["Lisa Porras", "Fabio Davila", "Maya Chen", "Omar Reyes", "Jess Tran"])
-    elif CALLS_TAB not in tabs:
-        st.info(f'Add a worksheet named "{CALLS_TAB}" with the GoTo call history export to see call stats.')
-    else:
-        calls = normalize_calls(tabs[CALLS_TAB])
-        if calls is not None and calls.dropna(subset=["datetime"]).empty:
-            st.info(f'The "{CALLS_TAB}" worksheet has no rows with a readable date yet.')
-            calls = None
+    calls = raw_calls = None
+    try:
+        if DEMO_MODE:
+            calls, raw_calls = normalize_calls(demo_calls(["Lisa Porras", "Fabio Davila", "Maya Chen", "Omar Reyes"]))
+        elif CALLS_TAB not in tabs or len(tabs[CALLS_TAB].columns) == 0:
+            st.info(f'Add a worksheet named "{CALLS_TAB}" with the appointment setters\' call data '
+                    f"(apt_call_res from the notebook) to see call stats.")
+        else:
+            calls, raw_calls = normalize_calls(tabs[CALLS_TAB])
+    except ValueError as err:
+        st.error(str(err))
 
-    if calls is not None:
-        calls = calls.dropna(subset=["datetime"])
-        today = dt.date.today()
-        lo, hi = calls.datetime.min().date(), max(calls.datetime.max().date(), today)
+    if calls is not None and not calls.empty:
+        lo, hi = calls.datetime.min().date(), calls.datetime.max().date()
         f1, f2 = st.columns([1, 2])
         with f1:
-            s, e = date_picker("calls_range", max(today.replace(day=1), lo), min(today, hi), lo, hi)
+            s, e = date_picker(f"calls_range_{lo}_{hi}", max(hi.replace(day=1), lo), hi, lo, hi)
         with f2:
             people = sorted(calls.person.unique())
             pick = st.multiselect("People", people, default=people, key="calls_people")
-        c = in_range(calls, s, e, "datetime")
-        c = c[c.person.isin(pick)]
+        mask = (calls.datetime >= pd.Timestamp(s)) & (calls.datetime < pd.Timestamp(e) + pd.Timedelta(days=1)) \
+            & calls.person.isin(pick)
+        c = calls[mask]
+        talked = c[~c.missed]
 
         kpi_strip([
             ("Total calls", f"{len(c):,}", None),
             ("Inbound", f"{(c.direction == 'Inbound').sum():,}", BLUE),
             ("Outbound", f"{(c.direction == 'Outbound').sum():,}", ORANGE),
-            ("Total talk time", hms(c.duration_sec.sum()), None),
-            ("Average call", mmss(c.duration_sec.mean() if len(c) else 0), None),
+            ("Missed", f"{c.missed.sum():,}", "#AEB8C6"),
+            ("Total talk time", hms(talked.duration_sec.sum()), None),
+            ("Avg call", mmss(talked.duration_sec.mean() if len(talked) else 0), None),
         ])
+        st.caption("Missed = " + ", ".join(MISSED_RESULTS) + ". Talk time and average use only calls that weren't missed. "
+                   "Dates default to this month; pick any range.")
 
-        g = c.groupby(["person", "direction"]).agg(calls=("duration_sec", "size"),
-                                                   secs=("duration_sec", "sum")).reset_index()
-        tbl = pd.DataFrame(index=sorted(c.person.unique()))
-        for d in ("Inbound", "Outbound"):
-            sub = g[g.direction == d].set_index("person")
-            tbl[d] = sub["calls"]
-            tbl[f"{d} time"] = sub["secs"]
-        tbl = tbl.fillna(0)
-        tbl["Total"] = c.groupby("person").size()
-        tbl["Total time"] = c.groupby("person").duration_sec.sum()
-        tbl["Avg call"] = tbl["Total time"] / tbl["Total"]
+        g = c.groupby("person")
+        tbl = pd.DataFrame({
+            "Inbound": c[c.direction == "Inbound"].groupby("person").size(),
+            "Outbound": c[c.direction == "Outbound"].groupby("person").size(),
+            "Internal": c[c.direction == "Internal"].groupby("person").size(),
+            "Total": g.size(),
+            "Missed": c[c.missed].groupby("person").size(),
+        }).fillna(0).astype(int)
+        tbl["Missed rate"] = pct(tbl.Missed, tbl.Total)
+        tbl["Talk time"] = talked.groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
+        tbl["Inbound time"] = talked[talked.direction == "Inbound"].groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
+        tbl["Outbound time"] = talked[talked.direction == "Outbound"].groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
+        tbl["Avg call"] = tbl["Talk time"] / (tbl.Total - tbl.Missed).replace(0, np.nan)
         tbl = tbl.sort_values("Total", ascending=False)
 
         left, right = st.columns([2, 3], gap="medium")
         with left:
             with st.container(border=True):
                 st.markdown("#### Calls by person")
-                bars = g[g.direction.isin(["Inbound", "Outbound"])]
+                bars = c[c.direction.isin(["Inbound", "Outbound"])].groupby(["person", "direction"]).size() \
+                    .rename("calls").reset_index()
                 chart = alt.Chart(bars).mark_bar(cornerRadius=2).encode(
                     y=alt.Y("person:N", sort=list(tbl.index), title=None),
                     x=alt.X("calls:Q", title="Calls"),
@@ -552,26 +578,59 @@ with tab_calls:
         with right:
             with st.container(border=True):
                 st.markdown("#### Calls and talk time by person")
-                show = tbl[["Inbound", "Outbound", "Total", "Inbound time", "Outbound time", "Total time", "Avg call"]].copy()
-                total = show[["Inbound", "Outbound", "Total", "Inbound time", "Outbound time", "Total time"]].sum()
-                total["Avg call"] = total["Total time"] / total["Total"] if total["Total"] else 0
-                show.loc["Total"] = total
-                for col in ("Inbound", "Outbound", "Total"):
+                show = tbl.copy()
+                tot = show.drop(columns=["Missed rate", "Avg call"]).sum()
+                tot["Missed rate"] = tot.Missed / tot.Total * 100 if tot.Total else np.nan
+                tot["Avg call"] = tot["Talk time"] / (tot.Total - tot.Missed) if tot.Total > tot.Missed else np.nan
+                show.loc["Total"] = tot
+                for col in ("Inbound", "Outbound", "Internal", "Total", "Missed"):
                     show[col] = show[col].astype(int)
-                for col in ("Inbound time", "Outbound time", "Total time", "Avg call"):
+                for col in ("Talk time", "Inbound time", "Outbound time"):
                     show[col] = show[col].map(hms)
-                st.dataframe(show, height=38 * (len(show) + 1) + 4)
+                show["Avg call"] = show["Avg call"].map(lambda v: "–" if pd.isna(v) else mmss(v))
+                show.index.name = "Person"
+                st.dataframe(show, height=38 * (len(show) + 1) + 4,
+                             column_config={"Missed rate": st.column_config.NumberColumn(format="%.1f%%")})
+
+        left, right = st.columns(2, gap="medium")
+        with left:
+            with st.container(border=True):
+                st.markdown("#### Calls per day")
+                daily = c[c.direction.isin(["Inbound", "Outbound"])].groupby(["date", "direction"]).size() \
+                    .rename("calls").reset_index()
+                st.altair_chart(alt.Chart(daily).mark_bar().encode(
+                    x=alt.X("yearmonthdate(date):O", title=None, axis=alt.Axis(format="%b %d", labelAngle=-45)),
+                    y=alt.Y("calls:Q", title="Calls"),
+                    color=alt.Color("direction:N", title=None, legend=alt.Legend(orient="top"),
+                                    scale=alt.Scale(domain=["Inbound", "Outbound"], range=[BLUE, ORANGE])),
+                    tooltip=[alt.Tooltip("yearmonthdate(date):O", title="Day", format="%a %b %d"), "direction", "calls"],
+                ).properties(height=260), width="stretch")
+        with right:
+            with st.container(border=True):
+                st.markdown("#### Calls by hour of day")
+                hourly = c.groupby(["hour", "direction"]).size().rename("calls").reset_index()
+                hourly = hourly[hourly.direction.isin(["Inbound", "Outbound"])]
+                st.altair_chart(alt.Chart(hourly).mark_bar().encode(
+                    x=alt.X("hour:O", title="Hour"),
+                    y=alt.Y("calls:Q", title="Calls"),
+                    color=alt.Color("direction:N", title=None, legend=alt.Legend(orient="top"),
+                                    scale=alt.Scale(domain=["Inbound", "Outbound"], range=[BLUE, ORANGE])),
+                    tooltip=["hour", "direction", "calls"],
+                ).properties(height=260), width="stretch")
 
         with st.container(border=True):
-            st.markdown("#### By phone line")
-            by_line = c.groupby(["person", "line"]).agg(Calls=("duration_sec", "size"),
-                                                        secs=("duration_sec", "sum")).reset_index()
-            by_line["Time"] = by_line.secs.map(hms)
-            wide = by_line.pivot(index="person", columns="line", values=["Calls", "Time"])
-            wide.columns = [f"{line} {m.lower()}" for m, line in wide.columns]
-            wide = wide[sorted(wide.columns)].fillna("–")
-            wide.index.name = "Person"
-            st.dataframe(wide)
+            st.markdown("#### Call results by person")
+            res_tbl = pd.crosstab(c.person, c.result, margins=True, margins_name="Total")
+            res_tbl.index.name = "Person"
+            st.dataframe(res_tbl)
+
+        with st.container(border=True):
+            st.markdown(f"#### Call list ({len(c):,} calls)")
+            st.caption("The calls for the dates and people picked above, as they are in the sheet.")
+            raw_view = raw_calls.loc[c.index]
+            st.download_button("Download CSV", raw_view.to_csv(index=False).encode("utf-8-sig"),
+                               file_name=f"setter_calls_{s:%Y%m%d}_{e:%Y%m%d}.csv", mime="text/csv")
+            st.dataframe(raw_view, hide_index=True, height=400)
 
 # ---------------------------------------------------------------- TAB 2
 with tab_setters:
@@ -691,7 +750,7 @@ with tab_sales:
         c_rows = None
 
     if c_rows is not None:
-        all_dates = c_rows.date
+        all_dates = pd.concat([c_rows.date, c_rows.apt_date]).dropna()
         today = dt.date.today()
         # Date range = first to last date in the Google Sheet
         lo = all_dates.min().date() if len(all_dates) else today
@@ -704,19 +763,32 @@ with tab_sales:
         with f2:
             pick = st.multiselect("Branches", sales_branches, default=sales_branches, key="sales_branches")
 
-        R = in_range(c_rows, s, e, "date")     # leads created in the date range
+        R = c_rows
+        start, end = pd.Timestamp(s), pd.Timestamp(e) + pd.Timedelta(days=1)
+        within = lambda col: (R[col] >= start) & (R[col] < end)
+        # Each count is UNIQUE leads_id, each filtered by its own date:
+        R = R.assign(
+            is_lead=within("date"),                               # lead created in range
+            is_apt=R.active & within("apt_date"),                 # active appointment set in range
+            is_cancel=R.cancelled & within("apt_date"),           # cancelled appointment set in range
+            is_order=R.ordered & within("order_date"),            # order, by appointment date
+        )
+        R = R[R.is_lead | R.is_apt | R.is_cancel | R.is_order]
 
         def metrics(D, by=None):
-            """Leads, and how many of those leads have an active appointment, a cancelled one, an order."""
+            """Unique leads, active appointments, cancelled and orders, overall or per `by` column."""
+            def count(df, flag):
+                sub = df[df[flag]]
+                return sub.lead.nunique() if by is None else sub.groupby(by).lead.nunique()
             if by is None:
-                m = pd.Series({"Leads": len(D), "Appointments": D.active.sum(),
-                               "Cancelled": D.cancelled.sum(), "Orders": D.ordered.sum()}, dtype=float)
+                m = pd.Series({"Leads": count(D, "is_lead"), "Appointments": count(D, "is_apt"),
+                               "Cancelled": count(D, "is_cancel"), "Orders": count(D, "is_order")}, dtype=float)
                 m["Apt / Leads"] = m.Appointments / m.Leads * 100 if m.Leads else np.nan
                 m["Order / Leads"] = m.Orders / m.Leads * 100 if m.Leads else np.nan
                 return m
-            g = D.groupby(by)
-            m = pd.DataFrame({"Leads": g.size(), "Appointments": g.active.sum(),
-                              "Cancelled": g.cancelled.sum(), "Orders": g.ordered.sum()}).astype(int)
+            m = pd.DataFrame({"Leads": count(D, "is_lead"), "Appointments": count(D, "is_apt"),
+                              "Cancelled": count(D, "is_cancel"), "Orders": count(D, "is_order")})
+            m = m.reindex(D[by].unique()).fillna(0).astype(int)
             m["Apt / Leads"] = pct(m.Appointments, m.Leads)
             m["Order / Leads"] = pct(m.Orders, m.Leads)
             return m
@@ -760,8 +832,9 @@ with tab_sales:
 
         with st.container(border=True):
             st.markdown("#### By sales rep")
-            st.caption(f"Each row in “{ALL_TAB}” is one lead, counted for the person who created it ({ALL_COLS['lead_by']}). "
-                       f"Appointments, cancellations and orders are of those leads. "
+            st.caption(f"All numbers count unique leads_id. Leads by {ALL_COLS['lead_date']}, appointments and "
+                       f"cancellations by {ALL_COLS['apt_date']}, orders by the appointment date. "
+                       f"Each lead counts for the person who created it ({ALL_COLS['lead_by']}). "
                        f"Leads with no creator (e.g. Web leads) count in All company, but not in any rep's row.")
             st.caption(f"Sorted by orders. “vs setters” = the rep’s % minus the appointment setters’ %. "
                        f"Example: a rep with Apt / Leads 0.0% vs setters {fmt_pct(setters['Apt / Leads'])} shows "
