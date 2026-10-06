@@ -83,6 +83,7 @@ EXCLUDE_REP_IDS = ["1261"]
 # LOOK
 # =====================================================================
 INK, MUTED, BLUE, ORANGE, RULE = "#1B2230", "#5A6474", "#1F5FBF", "#E8913F", "#D5DBE3"
+KINDS, KIND_COLORS = ["Inbound", "Outbound", "Missed"], ["#1F5FBF", "#E8913F", "#AEB8C6"]
 
 st.set_page_config(page_title="Appointment Setter Dashboard", layout="wide")
 st.markdown(f"""
@@ -530,93 +531,123 @@ with tab_calls:
             pick = st.multiselect("People", people, default=people, key="calls_people")
         mask = (calls.datetime >= pd.Timestamp(s)) & (calls.datetime < pd.Timestamp(e) + pd.Timedelta(days=1)) \
             & calls.person.isin(pick)
-        c = calls[mask]
-        talked = c[~c.missed]
+        c = calls[mask & calls.direction.isin(["Inbound", "Outbound"])]   # internal calls left out
+        # Three separate groups, no overlap: answered inbound, connected outbound, missed (either way)
+        c = c.assign(kind=np.where(c.missed, "Missed", c.direction))
+        talked = c[c.kind != "Missed"]
+        n_days = c.date.nunique()
 
         kpi_strip([
-            ("Total calls", f"{len(c):,}", None),
-            ("Inbound", f"{(c.direction == 'Inbound').sum():,}", BLUE),
-            ("Outbound", f"{(c.direction == 'Outbound').sum():,}", ORANGE),
-            ("Missed", f"{c.missed.sum():,}", "#AEB8C6"),
-            ("Total talk time", hms(talked.duration_sec.sum()), None),
-            ("Avg call", mmss(talked.duration_sec.mean() if len(talked) else 0), None),
+            ("Inbound", f"{(c.kind == 'Inbound').sum():,}", BLUE),
+            ("Outbound", f"{(c.kind == 'Outbound').sum():,}", ORANGE),
+            ("Missed", f"{(c.kind == 'Missed').sum():,}", "#AEB8C6"),
+            ("Avg calls / day", f"{len(talked) / n_days:,.0f}" if n_days else "0", None),
         ])
-        st.caption("Missed = " + ", ".join(MISSED_RESULTS) + ". Talk time and average use only calls that weren't missed. "
-                   "Dates default to the first and last call in the sheet; pick any range.")
+        st.caption(f"Inbound and Outbound don't include missed calls; Missed = {', '.join(MISSED_RESULTS)}. "
+                   f"Avg calls / day = {len(talked):,} inbound + outbound calls ÷ {n_days} days that had calls. "
+                   f"Dates default to the first and last call in the sheet.")
 
         g = c.groupby("person")
         tbl = pd.DataFrame({
-            "Inbound": c[c.direction == "Inbound"].groupby("person").size(),
-            "Outbound": c[c.direction == "Outbound"].groupby("person").size(),
-            "Internal": c[c.direction == "Internal"].groupby("person").size(),
-            "Total": g.size(),
-            "Missed": c[c.missed].groupby("person").size(),
-        }).fillna(0).astype(int)
-        tbl["Missed rate"] = pct(tbl.Missed, tbl.Total)
+            "Inbound": c[c.kind == "Inbound"].groupby("person").size(),
+            "Outbound": c[c.kind == "Outbound"].groupby("person").size(),
+            "Missed": c[c.kind == "Missed"].groupby("person").size(),
+        }).reindex(g.size().index).fillna(0).astype(int)
+        tbl["Missed rate"] = pct(tbl.Missed, g.size())
+        tbl["Avg calls / day"] = (tbl.Inbound + tbl.Outbound) / g.date.nunique()
         tbl["Talk time"] = talked.groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
-        tbl["Inbound time"] = talked[talked.direction == "Inbound"].groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
-        tbl["Outbound time"] = talked[talked.direction == "Outbound"].groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
-        tbl["Avg call"] = tbl["Talk time"] / (tbl.Total - tbl.Missed).replace(0, np.nan)
-        tbl = tbl.sort_values("Total", ascending=False)
+        tbl["Inbound time"] = talked[talked.kind == "Inbound"].groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
+        tbl["Outbound time"] = talked[talked.kind == "Outbound"].groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
+        tbl["Avg call"] = tbl["Talk time"] / (tbl.Inbound + tbl.Outbound).replace(0, np.nan)
+        tbl = tbl.sort_values("Avg calls / day", ascending=False)
 
         left, right = st.columns([2, 3], gap="medium")
         with left:
             with st.container(border=True):
                 st.markdown("#### Calls by person")
-                bars = c[c.direction.isin(["Inbound", "Outbound"])].groupby(["person", "direction"]).size() \
-                    .rename("calls").reset_index()
+                bars = c.groupby(["person", "kind"]).size().rename("calls").reset_index()
+                bars["order"] = bars.kind.map({k: i for i, k in enumerate(KINDS)})
                 chart = alt.Chart(bars).mark_bar(cornerRadius=2).encode(
                     y=alt.Y("person:N", sort=list(tbl.index), title=None),
                     x=alt.X("calls:Q", title="Calls"),
-                    color=alt.Color("direction:N", title=None,
-                                    scale=alt.Scale(domain=["Inbound", "Outbound"], range=[BLUE, ORANGE]),
+                    color=alt.Color("kind:N", title=None, sort=KINDS,
+                                    scale=alt.Scale(domain=KINDS, range=KIND_COLORS),
                                     legend=alt.Legend(orient="top")),
-                    order=alt.Order("direction:N"),
-                    tooltip=["person", "direction", "calls"],
+                    order=alt.Order("order:Q"),
+                    tooltip=["person", alt.Tooltip("kind:N", title="Type"), "calls"],
                 ).properties(height=max(220, 44 * len(tbl)))
                 st.altair_chart(chart, width="stretch")
         with right:
             with st.container(border=True):
                 st.markdown("#### Calls and talk time by person")
                 show = tbl.copy()
-                tot = show.drop(columns=["Missed rate", "Avg call"]).sum()
-                tot["Missed rate"] = tot.Missed / tot.Total * 100 if tot.Total else np.nan
-                tot["Avg call"] = tot["Talk time"] / (tot.Total - tot.Missed) if tot.Total > tot.Missed else np.nan
-                show.loc["Total"] = tot
-                for col in ("Inbound", "Outbound", "Internal", "Total", "Missed"):
+                tot = show.drop(columns=["Missed rate", "Avg call", "Avg calls / day"]).sum()
+                all_calls = tot.Inbound + tot.Outbound + tot.Missed
+                tot["Missed rate"] = tot.Missed / all_calls * 100 if all_calls else np.nan
+                tot["Avg calls / day"] = (tot.Inbound + tot.Outbound) / n_days if n_days else np.nan
+                tot["Avg call"] = tot["Talk time"] / (tot.Inbound + tot.Outbound) if tot.Inbound + tot.Outbound else np.nan
+                show.loc["Total"] = tot[show.columns]
+                for col in ("Inbound", "Outbound", "Missed"):
                     show[col] = show[col].astype(int)
                 for col in ("Talk time", "Inbound time", "Outbound time"):
                     show[col] = show[col].map(hms)
                 show["Avg call"] = show["Avg call"].map(lambda v: "–" if pd.isna(v) else mmss(v))
                 show.index.name = "Person"
                 st.dataframe(show, height=38 * (len(show) + 1) + 4,
-                             column_config={"Missed rate": st.column_config.NumberColumn(format="%.1f%%")})
+                             column_config={"Missed rate": st.column_config.NumberColumn(format="%.1f%%"),
+                                            "Avg calls / day": st.column_config.NumberColumn(format="%.1f")})
 
         left, right = st.columns(2, gap="medium")
         with left:
             with st.container(border=True):
                 st.markdown("#### Calls per day")
-                daily = c[c.direction.isin(["Inbound", "Outbound"])].groupby(["date", "direction"]).size() \
-                    .rename("calls").reset_index()
+                daily = c.groupby(["date", "kind"]).size().rename("calls").reset_index()
                 st.altair_chart(alt.Chart(daily).mark_bar().encode(
                     x=alt.X("yearmonthdate(date):O", title=None, axis=alt.Axis(format="%b %d", labelAngle=-45)),
                     y=alt.Y("calls:Q", title="Calls"),
-                    color=alt.Color("direction:N", title=None, legend=alt.Legend(orient="top"),
-                                    scale=alt.Scale(domain=["Inbound", "Outbound"], range=[BLUE, ORANGE])),
-                    tooltip=[alt.Tooltip("yearmonthdate(date):O", title="Day", format="%a %b %d"), "direction", "calls"],
+                    color=alt.Color("kind:N", title=None, legend=alt.Legend(orient="top"), sort=KINDS,
+                                    scale=alt.Scale(domain=KINDS, range=KIND_COLORS)),
+                    tooltip=[alt.Tooltip("yearmonthdate(date):O", title="Day", format="%a %b %d"), alt.Tooltip("kind:N", title="Type"), "calls"],
                 ).properties(height=260), width="stretch")
         with right:
             with st.container(border=True):
                 st.markdown("#### Calls by hour of day")
-                hourly = c.groupby(["hour", "direction"]).size().rename("calls").reset_index()
-                hourly = hourly[hourly.direction.isin(["Inbound", "Outbound"])]
+                hourly = c.groupby(["hour", "kind"]).size().rename("calls").reset_index()
                 st.altair_chart(alt.Chart(hourly).mark_bar().encode(
                     x=alt.X("hour:O", title="Hour"),
                     y=alt.Y("calls:Q", title="Calls"),
-                    color=alt.Color("direction:N", title=None, legend=alt.Legend(orient="top"),
-                                    scale=alt.Scale(domain=["Inbound", "Outbound"], range=[BLUE, ORANGE])),
-                    tooltip=["hour", "direction", "calls"],
+                    color=alt.Color("kind:N", title=None, legend=alt.Legend(orient="top"), sort=KINDS,
+                                    scale=alt.Scale(domain=KINDS, range=KIND_COLORS)),
+                    tooltip=["hour", alt.Tooltip("kind:N", title="Type"), "calls"],
                 ).properties(height=260), width="stretch")
+
+        with st.container(border=True):
+            st.markdown("#### Missed calls by hour of day")
+            mh = c[c.kind == "Missed"].groupby(["hour", "direction"]).size().rename("missed").reset_index()
+            all_h = c.groupby("hour").size().rename("all_calls")
+            mh = mh.join(all_h, on="hour")
+            rate = (c.assign(m=c.kind == "Missed").groupby("hour").m.mean() * 100).rename("rate").reset_index()
+            if mh.empty:
+                st.caption("No missed calls in this range.")
+            else:
+                mh["direction"] = mh.direction.map({"Inbound": "Inbound missed", "Outbound": "Outbound not answered"})
+                worst = mh.groupby("hour").missed.sum().idxmax()
+                bars = alt.Chart(mh).mark_bar(cornerRadiusTopLeft=2, cornerRadiusTopRight=2).encode(
+                    x=alt.X("hour:O", title="Hour"),
+                    y=alt.Y("missed:Q", title="Missed calls"),
+                    color=alt.Color("direction:N", title=None, legend=alt.Legend(orient="top"),
+                                    scale=alt.Scale(domain=["Inbound missed", "Outbound not answered"],
+                                                    range=["#5A6474", "#AEB8C6"])),
+                    tooltip=["hour", alt.Tooltip("direction:N", title="Type"), "missed",
+                             alt.Tooltip("all_calls:Q", title="All calls that hour")])
+                line = alt.Chart(rate).mark_line(point=True, color=ORANGE).encode(
+                    x="hour:O",
+                    y=alt.Y("rate:Q", title="Missed rate %", axis=alt.Axis(titleColor=ORANGE)),
+                    tooltip=["hour", alt.Tooltip("rate:Q", title="Missed rate %", format=".1f")])
+                st.altair_chart(alt.layer(bars, line).resolve_scale(y="independent").properties(height=280),
+                                width="stretch")
+                st.caption(f"Bars = number of missed calls each hour. Orange line = share of that hour's calls that were "
+                           f"missed. Most missed calls happen at {worst}:00.")
 
         with st.container(border=True):
             st.markdown("#### Call results by person")
