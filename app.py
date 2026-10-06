@@ -566,61 +566,47 @@ with tab_calls:
         tbl["Avg call"] = tbl["Talk time"] / len_t.replace(0, np.nan)
         tbl = tbl.sort_values("Avg calls / day", ascending=False)
 
-        left, right = st.columns([2, 3], gap="medium")
-        with left:
-            with st.container(border=True):
-                st.markdown("#### Calls by person")
-                bars = c.groupby(["person", "kind"]).size().rename("calls").reset_index()
-                bars["order"] = bars.kind.map({k: i for i, k in enumerate(KINDS)})
-                chart = alt.Chart(bars).mark_bar(cornerRadius=2).encode(
-                    y=alt.Y("person:N", sort=list(tbl.index), title=None),
-                    x=alt.X("calls:Q", title="Calls"),
-                    color=alt.Color("kind:N", title=None, sort=KINDS,
-                                    scale=alt.Scale(domain=KINDS, range=KIND_COLORS),
-                                    legend=alt.Legend(orient="top")),
-                    order=alt.Order("order:Q"),
-                    tooltip=["person", alt.Tooltip("kind:N", title="Type"), "calls"],
-                ).properties(height=max(220, 44 * len(tbl)))
-                st.altair_chart(chart, width="stretch")
-        with right:
-            with st.container(border=True):
-                st.markdown("#### Calls and talk time by person")
-                show = tbl.copy()
-                tot = show.drop(columns=["Avg call", "Avg calls / day"]).sum()
-                tot["Avg calls / day"] = len(talked) / n_days if n_days else np.nan
-                tot["Avg call"] = tot["Talk time"] / len(talked) if len(talked) else np.nan
-                show.loc["Total"] = tot[show.columns]
-                for col in ("Inbound", "Inbound missed", "Outbound", "Outbound no answer"):
-                    show[col] = show[col].astype(int)
-                for col in ("Talk time", "Inbound time", "Outbound time"):
-                    show[col] = show[col].map(hms)
-                show["Avg call"] = show["Avg call"].map(lambda v: "–" if pd.isna(v) else mmss(v))
-                show.index.name = "Person"
-                st.dataframe(show, height=38 * (len(show) + 1) + 4,
-                             column_config={"Avg calls / day": st.column_config.NumberColumn(format="%.1f")})
+        with st.container(border=True):
+            st.markdown("#### Calls by person")
+            st.caption("Inbound and Outbound are all calls in that direction; the missed / no-answer columns are the part of them that didn't connect.")
+            show = tbl.copy()
+            tot = show.drop(columns=["Avg call", "Avg calls / day"]).sum()
+            tot["Avg calls / day"] = len(talked) / n_days if n_days else np.nan
+            tot["Avg call"] = tot["Talk time"] / len(talked) if len(talked) else np.nan
+            show.loc["Total"] = tot[show.columns]
+            for col in ("Inbound", "Inbound missed", "Outbound", "Outbound no answer"):
+                show[col] = show[col].astype(int)
+            for col in ("Talk time", "Inbound time", "Outbound time"):
+                show[col] = show[col].map(hms)
+            show["Avg call"] = show["Avg call"].map(lambda v: "–" if pd.isna(v) else mmss(v))
+            show.index.name = "Person"
+            st.dataframe(show, height=38 * (len(show) + 1) + 4,
+                         column_config={"Avg calls / day": st.column_config.NumberColumn(format="%.1f")})
 
+        DIRS, DIR_COLORS = ["Inbound", "Outbound"], [BLUE, ORANGE]
         left, right = st.columns(2, gap="medium")
         with left:
             with st.container(border=True):
                 st.markdown("#### Calls per day")
-                daily = c.groupby(["date", "kind"]).size().rename("calls").reset_index()
+                daily = c.groupby(["date", "direction"]).size().rename("calls").reset_index()
                 st.altair_chart(alt.Chart(daily).mark_bar().encode(
                     x=alt.X("yearmonthdate(date):O", title=None, axis=alt.Axis(format="%b %d", labelAngle=-45)),
                     y=alt.Y("calls:Q", title="Calls"),
-                    color=alt.Color("kind:N", title=None, legend=alt.Legend(orient="top"), sort=KINDS,
-                                    scale=alt.Scale(domain=KINDS, range=KIND_COLORS)),
-                    tooltip=[alt.Tooltip("yearmonthdate(date):O", title="Day", format="%a %b %d"), alt.Tooltip("kind:N", title="Type"), "calls"],
+                    color=alt.Color("direction:N", title=None, legend=alt.Legend(orient="top"),
+                                    scale=alt.Scale(domain=DIRS, range=DIR_COLORS)),
+                    tooltip=[alt.Tooltip("yearmonthdate(date):O", title="Day", format="%a %b %d"),
+                             alt.Tooltip("direction:N", title="Direction"), "calls"],
                 ).properties(height=260), width="stretch")
         with right:
             with st.container(border=True):
                 st.markdown("#### Calls by hour of day")
-                hourly = c.groupby(["hour", "kind"]).size().rename("calls").reset_index()
+                hourly = c.groupby(["hour", "direction"]).size().rename("calls").reset_index()
                 st.altair_chart(alt.Chart(hourly).mark_bar().encode(
-                    x=alt.X("hour:O", title="Hour"),
+                    x=alt.X("hour:O", title="Hour of day", axis=alt.Axis(labelAngle=0)),
                     y=alt.Y("calls:Q", title="Calls"),
-                    color=alt.Color("kind:N", title=None, legend=alt.Legend(orient="top"), sort=KINDS,
-                                    scale=alt.Scale(domain=KINDS, range=KIND_COLORS)),
-                    tooltip=["hour", alt.Tooltip("kind:N", title="Type"), "calls"],
+                    color=alt.Color("direction:N", title=None, legend=alt.Legend(orient="top"),
+                                    scale=alt.Scale(domain=DIRS, range=DIR_COLORS)),
+                    tooltip=["hour", alt.Tooltip("direction:N", title="Direction"), "calls"],
                 ).properties(height=260), width="stretch")
 
         with st.container(border=True):
@@ -648,12 +634,6 @@ with tab_calls:
                 st.altair_chart((bars + labels).properties(height=280), width="stretch")
                 st.caption("Each bar = how many calls were missed during that hour. "
                            "Most missed calls: " + ", ".join(f"{int(h)}:00 ({n})" for h, n in zip(worst.hour, worst.total)) + ".")
-
-        with st.container(border=True):
-            st.markdown("#### Call results by person")
-            res_tbl = pd.crosstab(c.person, c.result, margins=True, margins_name="Total")
-            res_tbl.index.name = "Person"
-            st.dataframe(res_tbl)
 
         with st.container(border=True):
             st.markdown(f"#### Call list ({len(c):,} calls)")
