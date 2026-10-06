@@ -606,7 +606,7 @@ with tab_setters:
         t["Cancelled"] = As[As.status == "Cancelled"].groupby("setter").lead.nunique()
         t["Orders"] = As[As.ordered].groupby("setter").lead.nunique()
         cols = ["Leads", "Appointments", "Cancelled", "Orders"]
-        t = t.reindex(columns=cols).fillna(0).astype(int).sort_values("Appointments", ascending=False)
+        t = t.reindex(columns=cols).fillna(0).astype(int).sort_values(["Leads", "Appointments", "Orders"], ascending=False)
         t = with_total(t, cols, [("Apt / Leads", "Appointments", "Leads"),
                                  ("Order / Apt", "Orders", "Appointments")])
         t["Cancel rate"] = pct(t["Cancelled"], t["Appointments"] + t["Cancelled"])
