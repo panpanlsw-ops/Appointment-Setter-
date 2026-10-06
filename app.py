@@ -100,6 +100,8 @@ st.markdown(f"""
 .kpi:first-child {{ border-left: 0; }}
 .kpi .l {{ font-size: 14px; color: {MUTED}; display: flex; align-items: center; gap: 8px; }}
 .kpi .v {{ font-size: 36px; font-weight: 700; line-height: 1.05; color: {INK}; }}
+.kpi .sub {{ font-size: 14px; color: {MUTED}; }}
+.kpi .sub b {{ color: {INK}; font-weight: 650; }}
 .sw {{ width: 10px; height: 10px; border-radius: 2px; display: inline-block; }}
 .hero {{ background: {INK}; color: #F3F5F8; border-radius: 6px; padding: 26px 30px; display: flex;
         flex-direction: column; gap: 6px; margin-bottom: 12px; }}
@@ -417,12 +419,12 @@ def date_picker(key, default_start, default_end, lo, hi):
 
 
 def kpi_strip(items):
-    """items: list of (label, value, swatch_color_or_None)"""
-    cells = "".join(
-        f'<div class="kpi"><span class="l">'
-        f'{f"<span class=sw style=background:{c}></span>" if c else ""}{l}</span>'
-        f'<span class="v">{v}</span></div>'
-        for l, v, c in items)
+    """items: list of (label, value, swatch_color_or_None[, list of sub-lines])"""
+    def cell(l, v, c, subs=()):
+        sw = f"<span class=sw style=background:{c}></span>" if c else ""
+        lines = "".join(f'<span class="sub">{x}</span>' for x in subs)
+        return f'<div class="kpi"><span class="l">{sw}{l}</span><span class="v">{v}</span>{lines}</div>'
+    cells = "".join(cell(*it) for it in items)
     st.markdown(f'<div class="dash kpis" style="grid-template-columns:repeat({len(items)},minmax(0,1fr))">'
                 f'{cells}</div>', unsafe_allow_html=True)
 
@@ -537,28 +539,31 @@ with tab_calls:
         talked = c[c.kind != "Missed"]
         n_days = c.date.nunique()
 
+        inb, outb = c[c.direction == "Inbound"], c[c.direction == "Outbound"]
+        in_missed, out_missed = int(inb.missed.sum()), int(outb.missed.sum())
         kpi_strip([
-            ("Inbound", f"{(c.kind == 'Inbound').sum():,}", BLUE),
-            ("Outbound", f"{(c.kind == 'Outbound').sum():,}", ORANGE),
-            ("Missed", f"{(c.kind == 'Missed').sum():,}", "#AEB8C6"),
-            ("Avg calls / day", f"{len(talked) / n_days:,.0f}" if n_days else "0", None),
+            ("Inbound calls", f"{len(inb):,}", BLUE,
+             [f"<b>{len(inb) - in_missed:,}</b> answered", f"<b>{in_missed:,}</b> missed ({fmt_pct(in_missed / len(inb) * 100 if len(inb) else np.nan)})"]),
+            ("Outbound calls", f"{len(outb):,}", ORANGE,
+             [f"<b>{len(outb) - out_missed:,}</b> connected", f"<b>{out_missed:,}</b> no answer ({fmt_pct(out_missed / len(outb) * 100 if len(outb) else np.nan)})"]),
+            ("Avg calls / day", f"{len(talked) / n_days:,.0f}" if n_days else "0", None,
+             [f"answered + connected calls", f"÷ {n_days} days with calls"]),
         ])
-        st.caption(f"Inbound and Outbound don't include missed calls; Missed = {', '.join(MISSED_RESULTS)}. "
-                   f"Avg calls / day = {len(talked):,} inbound + outbound calls ÷ {n_days} days that had calls. "
-                   f"Dates default to the first and last call in the sheet.")
+        st.caption("Inbound missed = no one answered, sent to voicemail, or the customer hung up while on hold / in the queue. "
+                   "Outbound no answer = we called and the customer didn't pick up. "
+                   "Dates default to the first and last call in the sheet.")
 
         g = c.groupby("person")
+        by = lambda df: df.groupby("person").size()
         tbl = pd.DataFrame({
-            "Inbound": c[c.kind == "Inbound"].groupby("person").size(),
-            "Outbound": c[c.kind == "Outbound"].groupby("person").size(),
-            "Missed": c[c.kind == "Missed"].groupby("person").size(),
+            "Inbound": by(inb), "Inbound missed": by(inb[inb.missed]),
+            "Outbound": by(outb), "Outbound no answer": by(outb[outb.missed]),
         }).reindex(g.size().index).fillna(0).astype(int)
-        tbl["Missed rate"] = pct(tbl.Missed, g.size())
-        tbl["Avg calls / day"] = (tbl.Inbound + tbl.Outbound) / g.date.nunique()
+        tbl["Avg calls / day"] = (len_t := talked.groupby("person").size().reindex(tbl.index).fillna(0)) / g.date.nunique()
         tbl["Talk time"] = talked.groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
         tbl["Inbound time"] = talked[talked.kind == "Inbound"].groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
         tbl["Outbound time"] = talked[talked.kind == "Outbound"].groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
-        tbl["Avg call"] = tbl["Talk time"] / (tbl.Inbound + tbl.Outbound).replace(0, np.nan)
+        tbl["Avg call"] = tbl["Talk time"] / len_t.replace(0, np.nan)
         tbl = tbl.sort_values("Avg calls / day", ascending=False)
 
         left, right = st.columns([2, 3], gap="medium")
@@ -581,21 +586,18 @@ with tab_calls:
             with st.container(border=True):
                 st.markdown("#### Calls and talk time by person")
                 show = tbl.copy()
-                tot = show.drop(columns=["Missed rate", "Avg call", "Avg calls / day"]).sum()
-                all_calls = tot.Inbound + tot.Outbound + tot.Missed
-                tot["Missed rate"] = tot.Missed / all_calls * 100 if all_calls else np.nan
-                tot["Avg calls / day"] = (tot.Inbound + tot.Outbound) / n_days if n_days else np.nan
-                tot["Avg call"] = tot["Talk time"] / (tot.Inbound + tot.Outbound) if tot.Inbound + tot.Outbound else np.nan
+                tot = show.drop(columns=["Avg call", "Avg calls / day"]).sum()
+                tot["Avg calls / day"] = len(talked) / n_days if n_days else np.nan
+                tot["Avg call"] = tot["Talk time"] / len(talked) if len(talked) else np.nan
                 show.loc["Total"] = tot[show.columns]
-                for col in ("Inbound", "Outbound", "Missed"):
+                for col in ("Inbound", "Inbound missed", "Outbound", "Outbound no answer"):
                     show[col] = show[col].astype(int)
                 for col in ("Talk time", "Inbound time", "Outbound time"):
                     show[col] = show[col].map(hms)
                 show["Avg call"] = show["Avg call"].map(lambda v: "–" if pd.isna(v) else mmss(v))
                 show.index.name = "Person"
                 st.dataframe(show, height=38 * (len(show) + 1) + 4,
-                             column_config={"Missed rate": st.column_config.NumberColumn(format="%.1f%%"),
-                                            "Avg calls / day": st.column_config.NumberColumn(format="%.1f")})
+                             column_config={"Avg calls / day": st.column_config.NumberColumn(format="%.1f")})
 
         left, right = st.columns(2, gap="medium")
         with left:
@@ -623,31 +625,29 @@ with tab_calls:
 
         with st.container(border=True):
             st.markdown("#### Missed calls by hour of day")
-            mh = c[c.kind == "Missed"].groupby(["hour", "direction"]).size().rename("missed").reset_index()
-            all_h = c.groupby("hour").size().rename("all_calls")
-            mh = mh.join(all_h, on="hour")
-            rate = (c.assign(m=c.kind == "Missed").groupby("hour").m.mean() * 100).rename("rate").reset_index()
-            if mh.empty:
+            missed = c[c.kind == "Missed"]
+            if missed.empty:
                 st.caption("No missed calls in this range.")
             else:
-                mh["direction"] = mh.direction.map({"Inbound": "Inbound missed", "Outbound": "Outbound not answered"})
-                worst = mh.groupby("hour").missed.sum().idxmax()
+                mh = missed.groupby(["hour", "direction"]).size().rename("missed").reset_index()
+                mh["type"] = mh.direction.map({"Inbound": "Customer called in, not answered",
+                                               "Outbound": "We called out, customer didn't answer"})
+                totals = missed.groupby("hour").size().rename("total").reset_index()
+                worst = totals.sort_values("total", ascending=False).head(3)
                 bars = alt.Chart(mh).mark_bar(cornerRadiusTopLeft=2, cornerRadiusTopRight=2).encode(
-                    x=alt.X("hour:O", title="Hour"),
+                    x=alt.X("hour:O", title="Hour of day (8 = 8:00–8:59)", axis=alt.Axis(labelAngle=0)),
                     y=alt.Y("missed:Q", title="Missed calls"),
-                    color=alt.Color("direction:N", title=None, legend=alt.Legend(orient="top"),
-                                    scale=alt.Scale(domain=["Inbound missed", "Outbound not answered"],
+                    color=alt.Color("type:N", title=None, legend=alt.Legend(orient="top", labelLimit=320),
+                                    scale=alt.Scale(domain=["Customer called in, not answered",
+                                                            "We called out, customer didn't answer"],
                                                     range=["#5A6474", "#AEB8C6"])),
-                    tooltip=["hour", alt.Tooltip("direction:N", title="Type"), "missed",
-                             alt.Tooltip("all_calls:Q", title="All calls that hour")])
-                line = alt.Chart(rate).mark_line(point=True, color=ORANGE).encode(
-                    x="hour:O",
-                    y=alt.Y("rate:Q", title="Missed rate %", axis=alt.Axis(titleColor=ORANGE)),
-                    tooltip=["hour", alt.Tooltip("rate:Q", title="Missed rate %", format=".1f")])
-                st.altair_chart(alt.layer(bars, line).resolve_scale(y="independent").properties(height=280),
-                                width="stretch")
-                st.caption(f"Bars = number of missed calls each hour. Orange line = share of that hour's calls that were "
-                           f"missed. Most missed calls happen at {worst}:00.")
+                    tooltip=[alt.Tooltip("hour:O", title="Hour"), alt.Tooltip("type:N", title="Type"),
+                             alt.Tooltip("missed:Q", title="Missed calls")])
+                labels = alt.Chart(totals).mark_text(dy=-8, fontSize=12, fontWeight="bold", color=INK).encode(
+                    x="hour:O", y="total:Q", text="total:Q")
+                st.altair_chart((bars + labels).properties(height=280), width="stretch")
+                st.caption("Each bar = how many calls were missed during that hour. "
+                           "Most missed calls: " + ", ".join(f"{int(h)}:00 ({n})" for h, n in zip(worst.hour, worst.total)) + ".")
 
         with st.container(border=True):
             st.markdown("#### Call results by person")
