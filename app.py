@@ -542,23 +542,25 @@ with tab_calls:
         inb, outb = c[c.direction == "Inbound"], c[c.direction == "Outbound"]
         in_missed, out_missed = int(inb.missed.sum()), int(outb.missed.sum())
         kpi_strip([
-            ("Inbound calls", f"{len(inb):,}", BLUE,
-             [f"<b>{len(inb) - in_missed:,}</b> answered", f"<b>{in_missed:,}</b> missed ({fmt_pct(in_missed / len(inb) * 100 if len(inb) else np.nan)})"]),
-            ("Outbound calls", f"{len(outb):,}", ORANGE,
-             [f"<b>{len(outb) - out_missed:,}</b> connected", f"<b>{out_missed:,}</b> no answer ({fmt_pct(out_missed / len(outb) * 100 if len(outb) else np.nan)})"]),
+            ("Inbound calls (answered)", f"{len(inb) - in_missed:,}", BLUE,
+             [f"<b>{in_missed:,}</b> missed, not counted ({fmt_pct(in_missed / len(inb) * 100 if len(inb) else np.nan)} of inbound)"]),
+            ("Outbound calls (connected)", f"{len(outb) - out_missed:,}", ORANGE,
+             [f"<b>{out_missed:,}</b> no answer, not counted ({fmt_pct(out_missed / len(outb) * 100 if len(outb) else np.nan)} of outbound)"]),
             ("Avg calls / day", f"{len(talked) / n_days:,.0f}" if n_days else "0", None,
              [f"answered + connected calls", f"÷ {n_days} days with calls"]),
         ])
-        st.caption("Inbound missed = no one answered, sent to voicemail, or the customer hung up while on hold / in the queue. "
-                   "Outbound no answer = we called and the customer didn't pick up. "
-                   "Dates default to the first and last call in the sheet.")
+        st.caption("Everywhere on this page, Inbound and Outbound count only calls that connected; missed calls are "
+                   "shown separately and are left out of totals, averages and talk time. "
+                   "Inbound missed = no one answered, sent to voicemail, or the caller hung up on hold / in the queue. "
+                   "Outbound no answer = we called and the customer didn't pick up.")
 
         g = c.groupby("person")
         by = lambda df: df.groupby("person").size()
         tbl = pd.DataFrame({
-            "Inbound": by(inb), "Inbound missed": by(inb[inb.missed]),
-            "Outbound": by(outb), "Outbound no answer": by(outb[outb.missed]),
+            "Inbound": by(inb[~inb.missed]), "Inbound missed": by(inb[inb.missed]),
+            "Outbound": by(outb[~outb.missed]), "Outbound no answer": by(outb[outb.missed]),
         }).reindex(g.size().index).fillna(0).astype(int)
+        tbl["Total calls"] = tbl.Inbound + tbl.Outbound      # connected calls only (no missed)
         tbl["Avg calls / day"] = (len_t := talked.groupby("person").size().reindex(tbl.index).fillna(0)) / g.date.nunique()
         tbl["Talk time"] = talked.groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
         tbl["Inbound time"] = talked[talked.kind == "Inbound"].groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
@@ -568,35 +570,30 @@ with tab_calls:
 
         with st.container(border=True):
             st.markdown("#### Calls by person (chart)")
-            parts = ["Inbound answered", "Inbound missed", "Outbound connected", "Outbound no answer"]
-            pc = c.assign(part=np.select(
-                [(c.direction == "Inbound") & ~c.missed, c.direction == "Inbound", ~c.missed],
-                parts[:3], parts[3]))
-            bars = pc.groupby(["person", "part"]).size().rename("calls").reset_index()
-            bars["order"] = bars.part.map({k: i for i, k in enumerate(parts)})
-            totals = pc.groupby("person").size().rename("total").reset_index()
-            chart = alt.Chart(bars).mark_bar().encode(
-                y=alt.Y("person:N", sort=list(tbl.index), title=None, axis=alt.Axis(labelFontSize=13)),
-                x=alt.X("calls:Q", title="Calls"),
-                color=alt.Color("part:N", title=None, sort=parts, legend=alt.Legend(orient="top"),
-                                scale=alt.Scale(domain=parts, range=[BLUE, "#9DBCEB", ORANGE, "#F5CFA8"])),
-                order=alt.Order("order:Q"),
-                tooltip=["person", alt.Tooltip("part:N", title="Type"), "calls"])
-            labels = alt.Chart(totals).mark_text(align="left", dx=6, fontSize=12, fontWeight="bold", color=INK).encode(
-                y=alt.Y("person:N", sort=list(tbl.index)), x="total:Q", text=alt.Text("total:Q", format=","))
-            st.altair_chart((chart + labels).properties(height=max(220, 40 * len(tbl))), width="stretch")
-            st.caption("Dark blue + light blue = all inbound calls; orange + light orange = all outbound calls. "
-                       "The bars use the same numbers as the table below.")
+            # Same numbers as the Inbound and Outbound columns in the table (connected calls, no missed)
+            pb = talked.groupby(["person", "direction"]).size().rename("calls").reset_index()
+            y = alt.Y("person:N", sort=list(tbl.index), title=None,
+                      axis=alt.Axis(labelFontSize=13, labelLimit=200))
+            y_off = alt.YOffset("direction:N", sort=["Inbound", "Outbound"])
+            bar = alt.Chart(pb).mark_bar(cornerRadiusEnd=3).encode(
+                y=y, yOffset=y_off, x=alt.X("calls:Q", title="Calls"),
+                color=alt.Color("direction:N", title=None, legend=alt.Legend(orient="top"),
+                                scale=alt.Scale(domain=["Inbound", "Outbound"], range=[BLUE, ORANGE])),
+                tooltip=["person", alt.Tooltip("direction:N", title="Direction"), alt.Tooltip("calls:Q", format=",")])
+            bar_labels = bar.mark_text(align="left", dx=6, fontSize=12, fontWeight="bold", color=INK).encode(
+                text=alt.Text("calls:Q", format=","), color=alt.value(INK))
+            st.altair_chart((bar + bar_labels).properties(height=max(240, 56 * len(tbl))), width="stretch")
 
         with st.container(border=True):
             st.markdown("#### Calls by person (table)")
-            st.caption("Inbound and Outbound are all calls in that direction; the missed / no-answer columns are the part of them that didn't connect.")
+            st.caption("Inbound = answered inbound calls, Outbound = connected outbound calls. Missed calls are only in "
+                       "the two missed columns and are not in Total calls, Avg calls / day, talk time or Avg call.")
             show = tbl.copy()
             tot = show.drop(columns=["Avg call", "Avg calls / day"]).sum()
             tot["Avg calls / day"] = len(talked) / n_days if n_days else np.nan
             tot["Avg call"] = tot["Talk time"] / len(talked) if len(talked) else np.nan
             show.loc["Total"] = tot[show.columns]
-            for col in ("Inbound", "Inbound missed", "Outbound", "Outbound no answer"):
+            for col in ("Inbound", "Inbound missed", "Outbound", "Outbound no answer", "Total calls"):
                 show[col] = show[col].astype(int)
             for col in ("Talk time", "Inbound time", "Outbound time"):
                 show[col] = show[col].map(hms)
@@ -610,7 +607,7 @@ with tab_calls:
         with left:
             with st.container(border=True):
                 st.markdown("#### Calls per day")
-                daily = c.groupby(["date", "direction"]).size().rename("calls").reset_index()
+                daily = talked.groupby(["date", "direction"]).size().rename("calls").reset_index()
                 st.altair_chart(alt.Chart(daily).mark_bar().encode(
                     x=alt.X("yearmonthdate(date):O", title=None, axis=alt.Axis(format="%b %d", labelAngle=-45)),
                     y=alt.Y("calls:Q", title="Calls"),
@@ -622,7 +619,7 @@ with tab_calls:
         with right:
             with st.container(border=True):
                 st.markdown("#### Calls by hour of day")
-                hourly = c.groupby(["hour", "direction"]).size().rename("calls").reset_index()
+                hourly = talked.groupby(["hour", "direction"]).size().rename("calls").reset_index()
                 st.altair_chart(alt.Chart(hourly).mark_bar().encode(
                     x=alt.X("hour:O", title="Hour of day", axis=alt.Axis(labelAngle=0)),
                     y=alt.Y("calls:Q", title="Calls"),
