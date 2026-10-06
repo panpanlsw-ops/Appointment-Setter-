@@ -444,6 +444,41 @@ def date_picker(key, default_start, default_end, lo, hi):
     return s, e
 
 
+def checklist_filter(label, options, key, cols=3):
+    """A compact button ("People: all 7") that opens a checklist with Select all / Clear all.
+    Returns the checked options."""
+    keys = {opt: f"{key}_{i}_{opt}" for i, opt in enumerate(options)}
+    for k in keys.values():
+        st.session_state.setdefault(k, True)
+
+    def set_all(value):
+        for k in keys.values():
+            st.session_state[k] = value
+
+    on = [o for o, k in keys.items() if st.session_state[k]]
+    off = [o for o in options if o not in on]
+    if not off:
+        summary = f"{label}: all {len(options)}"
+    elif not on:
+        summary = f"{label}: none selected"
+    elif len(off) <= 2:
+        summary = f"{label}: all except {', '.join(off)}"
+    elif len(on) <= 2:
+        summary = f"{label}: {', '.join(on)}"
+    else:
+        summary = f"{label}: {len(on)} of {len(options)}"
+
+    st.markdown(f'<div style="font-size:14px;margin-bottom:6px">{label}</div>', unsafe_allow_html=True)
+    with st.popover(summary, width="stretch"):
+        b1, b2, _ = st.columns([1, 1, 2])
+        b1.button("Select all", on_click=set_all, args=(True,), width="stretch", key=f"{key}_all")
+        b2.button("Clear all", on_click=set_all, args=(False,), width="stretch", key=f"{key}_none")
+        grid = st.columns(cols)
+        for i, (opt, k) in enumerate(keys.items()):
+            grid[i % cols].checkbox(opt, key=k)
+    return [o for o, k in keys.items() if st.session_state[k]]
+
+
 def kpi_strip(items):
     """items: list of (label, value, swatch_color_or_None[, list of sub-lines])"""
     def cell(l, v, c, subs=()):
@@ -556,7 +591,7 @@ with tab_calls:
             s, e = date_picker(f"calls_range_{lo}_{hi}", lo, hi, lo, hi)   # first to last call in the sheet
         with f2:
             people = sorted(calls.person.unique())
-            pick = st.multiselect("People", people, default=people, key="calls_people")
+            pick = checklist_filter("People", people, key="calls_people")
         mask = (calls.datetime >= pd.Timestamp(s)) & (calls.datetime < pd.Timestamp(e) + pd.Timedelta(days=1)) \
             & calls.person.isin(pick)
         c = calls[mask & calls.direction.isin(["Inbound", "Outbound"])]   # internal calls left out
@@ -728,7 +763,7 @@ with tab_setters:
             s, e = date_picker(f"setter_range_{lo}_{hi}", lo, hi, lo, hi)
         with f2:
             names = sorted(set(s_leads.setter) | set(s_apts.setter))
-            pick = st.multiselect("Setters", names, default=names, key="setter_pick")
+            pick = checklist_filter("Setters", names, key="setter_pick")
 
         Ls = in_range(s_leads, s, e, "date");  Ls = Ls[Ls.setter.isin(pick)]
         As = in_range(s_apts, s, e, "date");   As = As[As.setter.isin(pick)]
@@ -836,35 +871,11 @@ with tab_sales:
         NO_CREATOR = "Leads with no creator (Web, etc.)"
         sales_branches = sorted(set(c_rows.branch) - {"", SETTER_BRANCH})
         branch_options = sales_branches + [SETTER_BRANCH, NO_CREATOR]
-        # Branch filter: a compact button that opens a checklist
-        keys = {bname: f"br_{i}_{bname}" for i, bname in enumerate(branch_options)}
-        for k in keys.values():
-            st.session_state.setdefault(k, True)
-        def _set_all(value):
-            for k in keys.values():
-                st.session_state[k] = value
-        picked_now = [bname for bname, k in keys.items() if st.session_state[k]]
-        off = [bname for bname in branch_options if bname not in picked_now]
-        if not off:
-            summary = f"Branches: all {len(branch_options)}"
-        elif len(off) <= 2:
-            summary = f"Branches: all except {', '.join(off)}"
-        else:
-            summary = f"Branches: {len(picked_now)} of {len(branch_options)}"
-
         f1, f2 = st.columns([3, 2])
         with f1:
             s, e = date_picker(f"sales_range_{lo}_{hi}", lo, hi, lo, hi)
         with f2:
-            st.markdown('<div style="font-size:14px;margin-bottom:6px">Branches</div>', unsafe_allow_html=True)
-            with st.popover(summary, width="stretch"):
-                b1, b2, _ = st.columns([1, 1, 2])
-                b1.button("Select all", on_click=_set_all, args=(True,), width="stretch", key="br_all")
-                b2.button("Clear all", on_click=_set_all, args=(False,), width="stretch", key="br_none")
-                cols = st.columns(3)
-                for i, (bname, k) in enumerate(keys.items()):
-                    cols[i % 3].checkbox(bname, key=k)
-        pick = [bname for bname, k in keys.items() if st.session_state[k]]
+            pick = checklist_filter("Branches", branch_options, key="br")
         all_picked = set(pick) == set(branch_options)
         scope = "All company" if all_picked else "Selected branches"
 
