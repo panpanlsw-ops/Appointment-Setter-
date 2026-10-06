@@ -412,13 +412,36 @@ def fmt_pct(v):
     return "–" if pd.isna(v) else f"{v:.1f}%"
 
 
+QUICK_RANGES = ["All dates", "This month", "Last month", "Last 7 days", "Last 30 days"]
+
+
 def date_picker(key, default_start, default_end, lo, hi):
-    val = st.date_input("Date range", (default_start, default_end), min_value=lo, max_value=hi,
-                        key=key, format="MM/DD/YYYY")
-    if not isinstance(val, (tuple, list)) or len(val) < 2:
-        st.info("Pick an end date to finish the range.")
-        st.stop()
-    return val
+    """Quick pick + separate From / To boxes (each opens a calendar and closes after one click)."""
+    k_from, k_to, k_quick = f"{key}_from", f"{key}_to", f"{key}_quick"
+    st.session_state.setdefault(k_from, default_start)
+    st.session_state.setdefault(k_to, default_end)
+
+    def apply_quick():
+        q = st.session_state[k_quick]
+        first = hi.replace(day=1)
+        a, b = {
+            "All dates": (lo, hi),
+            "This month": (first, hi),
+            "Last month": ((first - dt.timedelta(days=1)).replace(day=1), first - dt.timedelta(days=1)),
+            "Last 7 days": (hi - dt.timedelta(days=6), hi),
+            "Last 30 days": (hi - dt.timedelta(days=29), hi),
+        }[q]
+        st.session_state[k_from] = min(max(a, lo), hi)
+        st.session_state[k_to] = max(min(b, hi), lo)
+
+    c1, c2, c3 = st.columns([1.15, 1, 1])
+    c1.selectbox("Quick pick", QUICK_RANGES, key=k_quick, on_change=apply_quick,
+                 help=f"Based on the latest date in the sheet ({hi:%m/%d/%Y}).")
+    s = c2.date_input("From", min_value=lo, max_value=hi, key=k_from, format="MM/DD/YYYY")
+    e = c3.date_input("To", min_value=lo, max_value=hi, key=k_to, format="MM/DD/YYYY")
+    if s > e:
+        s, e = e, s
+    return s, e
 
 
 def kpi_strip(items):
@@ -528,7 +551,7 @@ with tab_calls:
 
     if calls is not None and not calls.empty:
         lo, hi = calls.datetime.min().date(), calls.datetime.max().date()
-        f1, f2 = st.columns([1, 2])
+        f1, f2 = st.columns([3, 2])
         with f1:
             s, e = date_picker(f"calls_range_{lo}_{hi}", lo, hi, lo, hi)   # first to last call in the sheet
         with f2:
@@ -700,7 +723,7 @@ with tab_setters:
         # Date range = first to last date in the Google Sheet
         lo = all_dates.min().date() if len(all_dates) else today
         hi = all_dates.max().date() if len(all_dates) else today
-        f1, f2 = st.columns([1, 2])
+        f1, f2 = st.columns([3, 2])
         with f1:
             s, e = date_picker(f"setter_range_{lo}_{hi}", lo, hi, lo, hi)
         with f2:
@@ -829,7 +852,7 @@ with tab_sales:
         else:
             summary = f"Branches: {len(picked_now)} of {len(branch_options)}"
 
-        f1, f2 = st.columns([1, 2])
+        f1, f2 = st.columns([3, 2])
         with f1:
             s, e = date_picker(f"sales_range_{lo}_{hi}", lo, hi, lo, hi)
         with f2:
