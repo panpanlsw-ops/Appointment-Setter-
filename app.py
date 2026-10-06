@@ -813,15 +813,20 @@ with tab_sales:
         NO_CREATOR = "Leads with no creator (Web, etc.)"
         sales_branches = sorted(set(c_rows.branch) - {"", SETTER_BRANCH})
         branch_options = sales_branches + [SETTER_BRANCH, NO_CREATOR]
-        f1, f2 = st.columns([1, 2])
-        with f1:
-            s, e = date_picker(f"sales_range_{lo}_{hi}", lo, hi, lo, hi)
-        with f2:
-            excluded = st.multiselect(
-                "Exclude branches", branch_options, default=[], key="sales_exclude",
-                placeholder="Nothing excluded: showing all branches. Click to pick branches to leave out.")
-        pick = [b for b in branch_options if b not in excluded]
-        all_picked = not excluded
+        s, e = date_picker(f"sales_range_{lo}_{hi}", lo, hi, lo, hi)
+
+        # Branch filter: every branch is a button; click to turn it off / on
+        if "sales_pills" not in st.session_state or not set(st.session_state.sales_pills) <= set(branch_options):
+            st.session_state.sales_pills = list(branch_options)
+        h1, h2, h3 = st.columns([6, 1, 1])
+        h1.markdown("**Branches** · click a branch to turn it off or on")
+        if h2.button("Select all", width="stretch", key="sales_all"):
+            st.session_state.sales_pills = list(branch_options)
+        if h3.button("Clear all", width="stretch", key="sales_none"):
+            st.session_state.sales_pills = []
+        pick = st.pills("Branches", branch_options, selection_mode="multi", key="sales_pills",
+                        label_visibility="collapsed") or []
+        all_picked = set(pick) == set(branch_options)
         scope = "All company" if all_picked else "Selected branches"
 
         R = c_rows
@@ -898,7 +903,7 @@ with tab_sales:
             st.caption(f"All numbers count unique leads_id. Leads by {ALL_COLS['lead_date']}, appointments and "
                        f"cancellations by {ALL_COLS['apt_date']}, orders by the appointment date. "
                        f"Each lead counts for the person who created it ({ALL_COLS['lead_by']}). "
-                       f"The cards at the top follow the Exclude branches filter. “{NO_CREATOR}” = leads where "
+                       f"The cards at the top follow the Branches filter. “{NO_CREATOR}” = leads where "
                        f"{ALL_COLS['lead_by']} is empty; they count in the cards unless excluded, never in a rep's row.")
             st.caption(f"Sorted by leads, then appointments, then orders. “vs setters” = the rep’s % minus the appointment setters’ %. "
                        f"Example: a rep with Apt / Leads 0.0% vs setters {fmt_pct(setters['Apt / Leads'])} shows "
