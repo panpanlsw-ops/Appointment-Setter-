@@ -813,19 +813,35 @@ with tab_sales:
         NO_CREATOR = "Leads with no creator (Web, etc.)"
         sales_branches = sorted(set(c_rows.branch) - {"", SETTER_BRANCH})
         branch_options = sales_branches + [SETTER_BRANCH, NO_CREATOR]
-        s, e = date_picker(f"sales_range_{lo}_{hi}", lo, hi, lo, hi)
+        # Branch filter: a compact button that opens a checklist
+        keys = {bname: f"br_{i}_{bname}" for i, bname in enumerate(branch_options)}
+        for k in keys.values():
+            st.session_state.setdefault(k, True)
+        def _set_all(value):
+            for k in keys.values():
+                st.session_state[k] = value
+        picked_now = [bname for bname, k in keys.items() if st.session_state[k]]
+        off = [bname for bname in branch_options if bname not in picked_now]
+        if not off:
+            summary = f"Branches: all {len(branch_options)}"
+        elif len(off) <= 2:
+            summary = f"Branches: all except {', '.join(off)}"
+        else:
+            summary = f"Branches: {len(picked_now)} of {len(branch_options)}"
 
-        # Branch filter: every branch is a button; click to turn it off / on
-        if "sales_pills" not in st.session_state or not set(st.session_state.sales_pills) <= set(branch_options):
-            st.session_state.sales_pills = list(branch_options)
-        h1, h2, h3 = st.columns([6, 1, 1])
-        h1.markdown("**Branches** · click a branch to turn it off or on")
-        if h2.button("Select all", width="stretch", key="sales_all"):
-            st.session_state.sales_pills = list(branch_options)
-        if h3.button("Clear all", width="stretch", key="sales_none"):
-            st.session_state.sales_pills = []
-        pick = st.pills("Branches", branch_options, selection_mode="multi", key="sales_pills",
-                        label_visibility="collapsed") or []
+        f1, f2 = st.columns([1, 2])
+        with f1:
+            s, e = date_picker(f"sales_range_{lo}_{hi}", lo, hi, lo, hi)
+        with f2:
+            st.markdown('<div style="font-size:14px;margin-bottom:6px">Branches</div>', unsafe_allow_html=True)
+            with st.popover(summary, width="stretch"):
+                b1, b2, _ = st.columns([1, 1, 2])
+                b1.button("Select all", on_click=_set_all, args=(True,), width="stretch", key="br_all")
+                b2.button("Clear all", on_click=_set_all, args=(False,), width="stretch", key="br_none")
+                cols = st.columns(3)
+                for i, (bname, k) in enumerate(keys.items()):
+                    cols[i % 3].checkbox(bname, key=k)
+        pick = [bname for bname, k in keys.items() if st.session_state[k]]
         all_picked = set(pick) == set(branch_options)
         scope = "All company" if all_picked else "Selected branches"
 
