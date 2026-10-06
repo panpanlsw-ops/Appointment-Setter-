@@ -669,7 +669,7 @@ with tab_calls:
                     color=alt.Color("type:N", title=None, legend=alt.Legend(orient="top", labelLimit=320),
                                     scale=alt.Scale(domain=["Customer called in, not answered",
                                                             "We called out, customer didn't answer"],
-                                                    range=["#E5484D", "#FFB224"])),
+                                                    range=["#4F86D9", "#F4B47A"])),   # soft blue = inbound missed, soft orange = outbound no answer
                     tooltip=[alt.Tooltip("hour:O", title="Hour"), alt.Tooltip("type:N", title="Type"),
                              alt.Tooltip("missed:Q", title="Missed calls")])
                 labels = alt.Chart(totals).mark_text(dy=-8, fontSize=12, fontWeight="bold", color=INK).encode(
