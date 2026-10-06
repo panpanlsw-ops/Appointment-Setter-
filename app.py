@@ -254,7 +254,7 @@ def company_data(tabs):
         "ordered": text(d[c["order"]]) != "",
     })
     no_owner = int((rows.person == "").sum())
-    rows = rows[(rows.person != "") & rows.date.notna()]
+    rows = rows[rows.date.notna()]
     rows = rows.drop_duplicates("lead", keep="last")       # one row per lead
     return rows, no_owner
 
@@ -721,11 +721,14 @@ with tab_sales:
             m["Order / Leads"] = pct(m.Orders, m.Leads)
             return m
 
+        # The whole company: every lead (row) in the all company tab
+        company = metrics(R)
+
         # Benchmark: leads created by the appointment setters department
         setters = metrics(R[is_setter_branch(R.branch)])
 
         # Sales reps: leads created by everyone else, in the chosen branches
-        Rs = R[R.branch.isin(pick)]
+        Rs = R[R.branch.isin(pick) & (R.person != "")]
         sales_tot = metrics(Rs)
         t = metrics(Rs, by="person")
         t.insert(0, "Branch", Rs.groupby("person").branch.agg(lambda b: b.mode().iat[0]).reindex(t.index))
@@ -737,20 +740,20 @@ with tab_sales:
         t.index.name = "Sales rep"
 
         kpi_strip([
-            ("Leads", f"{int(sales_tot.Leads):,}", INK),
-            ("Appointments", f"{int(sales_tot.Appointments):,}", BLUE),
-            ("Cancelled", f"{int(sales_tot.Cancelled):,}", "#AEB8C6"),
-            ("Orders", f"{int(sales_tot.Orders):,}", ORANGE),
+            ("Leads", f"{int(company.Leads):,}", INK),
+            ("Appointments", f"{int(company.Appointments):,}", BLUE),
+            ("Cancelled", f"{int(company.Cancelled):,}", "#AEB8C6"),
+            ("Orders", f"{int(company.Orders):,}", ORANGE),
         ])
 
         st.markdown(f"""
         <div class="dash cmp">
           <div><h3>Apt / Leads</h3><div class="row">
-            <div><div class="v">{fmt_pct(sales_tot['Apt / Leads'])}</div><div class="l">Sales reps</div></div>
+            <div><div class="v">{fmt_pct(company['Apt / Leads'])}</div><div class="l">All company</div></div>
             <div><div class="v blue">{fmt_pct(setters['Apt / Leads'])}</div><div class="l">Appointment setters</div></div>
           </div></div>
           <div><h3>Order / Leads</h3><div class="row">
-            <div><div class="v">{fmt_pct(sales_tot['Order / Leads'])}</div><div class="l">Sales reps</div></div>
+            <div><div class="v">{fmt_pct(company['Order / Leads'])}</div><div class="l">All company</div></div>
             <div><div class="v blue">{fmt_pct(setters['Order / Leads'])}</div><div class="l">Appointment setters</div></div>
           </div></div>
         </div>""", unsafe_allow_html=True)
@@ -759,7 +762,7 @@ with tab_sales:
             st.markdown("#### By sales rep")
             st.caption(f"Each row in “{ALL_TAB}” is one lead, counted for the person who created it ({ALL_COLS['lead_by']}). "
                        f"Appointments, cancellations and orders are of those leads. "
-                       f"{no_owner:,} rows with no creator are left out.")
+                       f"Leads with no creator (e.g. Web leads) count in All company, but not in any rep's row.")
             st.caption(f"Sorted by orders. “vs setters” = the rep’s % minus the appointment setters’ %. "
                        f"Example: a rep with Apt / Leads 0.0% vs setters {fmt_pct(setters['Apt / Leads'])} shows "
                        f"▼ −{fmt_pct(setters['Apt / Leads'])}. ▲ blue = better than setters, ▼ orange = worse.")
@@ -771,7 +774,10 @@ with tab_sales:
                  "Order / Leads vs setters": sales_tot["Order / Leads"] - setters["Order / Leads"]},
                 {"Branch": "", **setters.to_dict(),
                  "Apt / Leads vs setters": np.nan, "Order / Leads vs setters": np.nan},
-            ], index=["All sales reps", "Appointment setters"])
+                {"Branch": "", **company.to_dict(),
+                 "Apt / Leads vs setters": company["Apt / Leads"] - setters["Apt / Leads"],
+                 "Order / Leads vs setters": company["Order / Leads"] - setters["Order / Leads"]},
+            ], index=["All sales reps", "Appointment setters", "All company"])
             show = pd.concat([show, summary[show.columns]])
             for col in ["Leads", "Appointments", "Cancelled", "Orders"]:
                 show[col] = show[col].astype(int)
@@ -787,7 +793,7 @@ with tab_sales:
                         else "color: #8A3B06; background-color: #FCEBDD; font-weight: 600")
 
             def summary_rows(row):
-                if row.name == "All sales reps":
+                if row.name in ("All sales reps", "All company"):
                     return ["font-weight: 700; border-top: 2px solid #1B2230"] * len(row)
                 if row.name == "Appointment setters":
                     return [f"color: {BLUE}; font-weight: 600"] * len(row)
