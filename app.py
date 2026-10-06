@@ -524,7 +524,7 @@ with tab_calls:
         lo, hi = calls.datetime.min().date(), calls.datetime.max().date()
         f1, f2 = st.columns([1, 2])
         with f1:
-            s, e = date_picker(f"calls_range_{lo}_{hi}", max(hi.replace(day=1), lo), hi, lo, hi)
+            s, e = date_picker(f"calls_range_{lo}_{hi}", lo, hi, lo, hi)   # first to last call in the sheet
         with f2:
             people = sorted(calls.person.unique())
             pick = st.multiselect("People", people, default=people, key="calls_people")
@@ -542,7 +542,7 @@ with tab_calls:
             ("Avg call", mmss(talked.duration_sec.mean() if len(talked) else 0), None),
         ])
         st.caption("Missed = " + ", ".join(MISSED_RESULTS) + ". Talk time and average use only calls that weren't missed. "
-                   "Dates default to this month; pick any range.")
+                   "Dates default to the first and last call in the sheet; pick any range.")
 
         g = c.groupby("person")
         tbl = pd.DataFrame({
