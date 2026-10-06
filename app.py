@@ -860,7 +860,7 @@ with tab_sales:
         t.insert(0, "Branch", Rs.groupby("person").branch.agg(lambda b: b.mode().iat[0]).reindex(t.index))
         t["Apt / Leads vs setters"] = t["Apt / Leads"] - setters["Apt / Leads"]
         t["Order / Leads vs setters"] = t["Order / Leads"] - setters["Order / Leads"]
-        t = t.sort_values(["Orders", "Appointments", "Leads"], ascending=False)
+        t = t.sort_values(["Leads", "Appointments", "Orders"], ascending=False)
         t = t[["Branch", "Leads", "Appointments", "Cancelled", "Orders",
                "Apt / Leads", "Apt / Leads vs setters", "Order / Leads", "Order / Leads vs setters"]]
         t.index.name = "Sales rep"
@@ -890,7 +890,7 @@ with tab_sales:
                        f"cancellations by {ALL_COLS['apt_date']}, orders by the appointment date. "
                        f"Each lead counts for the person who created it ({ALL_COLS['lead_by']}). "
                        f"Leads with no creator (e.g. Web leads) count in All company, but not in any rep's row.")
-            st.caption(f"Sorted by orders. “vs setters” = the rep’s % minus the appointment setters’ %. "
+            st.caption(f"Sorted by leads, then appointments, then orders. “vs setters” = the rep’s % minus the appointment setters’ %. "
                        f"Example: a rep with Apt / Leads 0.0% vs setters {fmt_pct(setters['Apt / Leads'])} shows "
                        f"▼ −{fmt_pct(setters['Apt / Leads'])}. ▲ blue = better than setters, ▼ orange = worse.")
             # Rows sorted by orders, then two summary rows like the design
