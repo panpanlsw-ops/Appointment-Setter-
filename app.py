@@ -51,6 +51,7 @@ CALL_COLS = {
     "date":      "Call Date",
     "time":      "Call Time",
     "hour":      "Hour",
+    "weekday":   "Weekday",                 # Monday ... Sunday
     "duration":  "Duration [Milliseconds]",
     "direction": "Direction",               # Inbound / Outbound / Internal
     "result":    "Call Result",
@@ -333,7 +334,7 @@ def demo_calls(names):
     return pd.DataFrame({
         "Call Date": day.strftime("%Y-%m-%d"),
         "Call Time": [f"{h:02d}:{m:02d}:{x:02d}" for h, m, x in zip(hour, rng.integers(0, 60, n), rng.integers(0, 60, n))],
-        "Hour": hour, "Duration [Milliseconds]": secs * 1000, "Direction": direction,
+        "Hour": hour, "Weekday": day.day_name(), "Duration [Milliseconds]": secs * 1000, "Direction": direction,
         "Call Result": result, "participant_name": rng.choice(names, n),
     })
 
@@ -378,8 +379,10 @@ def normalize_calls(raw):
         "missed": result.isin(MISSED_RESULTS),
         "duration_sec": pd.to_numeric(raw[c["duration"]], errors="coerce").fillna(0) / 1000,
         "hour": pd.to_numeric(raw[c["hour"]], errors="coerce"),
+        "weekday": text(raw[c["weekday"]]).str.title() if c.get("weekday") in raw.columns else "",
     })
     calls["date"] = calls.datetime.dt.normalize()
+    calls["weekday"] = calls.weekday.where(calls.weekday != "", calls.datetime.dt.day_name())
     return calls[calls.datetime.notna() & (calls.person != "")], raw
 
 
@@ -568,54 +571,72 @@ with tab_calls:
         tbl["Avg call"] = tbl["Talk time"] / len_t.replace(0, np.nan)
         tbl = tbl.sort_values("Avg calls / day", ascending=False)
 
-        with st.container(border=True):
-            st.markdown("#### Calls by person (chart)")
-            # Same numbers as the Inbound and Outbound columns in the table (connected calls, no missed)
-            pb = talked.groupby(["person", "direction"]).size().rename("calls").reset_index()
-            y = alt.Y("person:N", sort=list(tbl.index), title=None,
-                      axis=alt.Axis(labelFontSize=13, labelLimit=200))
-            y_off = alt.YOffset("direction:N", sort=["Inbound", "Outbound"])
-            bar = alt.Chart(pb).mark_bar(cornerRadiusEnd=3).encode(
-                y=y, yOffset=y_off, x=alt.X("calls:Q", title="Calls"),
-                color=alt.Color("direction:N", title=None, legend=alt.Legend(orient="top"),
-                                scale=alt.Scale(domain=["Inbound", "Outbound"], range=[BLUE, ORANGE])),
-                tooltip=["person", alt.Tooltip("direction:N", title="Direction"), alt.Tooltip("calls:Q", format=",")])
-            bar_labels = bar.mark_text(align="left", dx=6, fontSize=12, fontWeight="bold", color=INK).encode(
-                text=alt.Text("calls:Q", format=","), color=alt.value(INK))
-            st.altair_chart((bar + bar_labels).properties(height=max(240, 56 * len(tbl))), width="stretch")
-
-        with st.container(border=True):
-            st.markdown("#### Calls by person (table)")
-            st.caption("Inbound = answered inbound calls, Outbound = connected outbound calls. Missed calls are only in "
-                       "the two missed columns and are not in Total calls, Avg calls / day, talk time or Avg call.")
-            show = tbl.copy()
-            tot = show.drop(columns=["Avg call", "Avg calls / day"]).sum()
-            tot["Avg calls / day"] = len(talked) / n_days if n_days else np.nan
-            tot["Avg call"] = tot["Talk time"] / len(talked) if len(talked) else np.nan
-            show.loc["Total"] = tot[show.columns]
-            for col in ("Inbound", "Inbound missed", "Outbound", "Outbound no answer", "Total calls"):
-                show[col] = show[col].astype(int)
-            for col in ("Talk time", "Inbound time", "Outbound time"):
-                show[col] = show[col].map(hms)
-            show["Avg call"] = show["Avg call"].map(lambda v: "–" if pd.isna(v) else mmss(v))
-            show.index.name = "Person"
-            st.dataframe(show, height=38 * (len(show) + 1) + 4,
-                         column_config={"Avg calls / day": st.column_config.NumberColumn(format="%.1f")})
+        left, right = st.columns([2, 3], gap="medium")
+        with left:
+            with st.container(border=True):
+                st.markdown("#### Calls by person (chart)")
+                # One bar per person: Inbound + Outbound (connected calls), same numbers as the table
+                pb = talked.groupby(["person", "direction"]).size().rename("calls").reset_index()
+                pb["order"] = (pb.direction == "Outbound").astype(int)
+                tot_pb = pb.groupby("person").calls.sum().rename("total").reset_index()
+                y = alt.Y("person:N", sort=list(tbl.index), title=None, axis=alt.Axis(labelLimit=160))
+                bar = alt.Chart(pb).mark_bar().encode(
+                    y=y, x=alt.X("calls:Q", title="Calls"),
+                    color=alt.Color("direction:N", title=None, legend=alt.Legend(orient="top"),
+                                    scale=alt.Scale(domain=["Inbound", "Outbound"], range=[BLUE, ORANGE])),
+                    order=alt.Order("order:Q"),
+                    tooltip=["person", alt.Tooltip("direction:N", title="Direction"),
+                             alt.Tooltip("calls:Q", format=",")])
+                bar_labels = alt.Chart(tot_pb).mark_text(align="left", dx=5, fontSize=12, fontWeight="bold",
+                                                         color=INK).encode(
+                    y=y, x="total:Q", text=alt.Text("total:Q", format=","))
+                st.altair_chart((bar + bar_labels).properties(height=38 * len(tbl) + 40), width="stretch")
+                st.caption("Bar = Total calls in the table (blue Inbound + orange Outbound). Hover for each part.")
+        with right:
+            with st.container(border=True):
+                st.markdown("#### Calls by person (table)")
+                st.caption("Inbound = answered inbound calls, Outbound = connected outbound calls. Missed calls are only in "
+                           "the two missed columns and are not in Total calls, Avg calls / day, talk time or Avg call.")
+                show = tbl.copy()
+                tot = show.drop(columns=["Avg call", "Avg calls / day"]).sum()
+                tot["Avg calls / day"] = len(talked) / n_days if n_days else np.nan
+                tot["Avg call"] = tot["Talk time"] / len(talked) if len(talked) else np.nan
+                show.loc["Total"] = tot[show.columns]
+                for col in ("Inbound", "Inbound missed", "Outbound", "Outbound no answer", "Total calls"):
+                    show[col] = show[col].astype(int)
+                for col in ("Talk time", "Inbound time", "Outbound time"):
+                    show[col] = show[col].map(hms)
+                show["Avg call"] = show["Avg call"].map(lambda v: "–" if pd.isna(v) else mmss(v))
+                show.index.name = "Person"
+                st.dataframe(show, height=38 * (len(show) + 1) + 4,
+                             column_config={"Avg calls / day": st.column_config.NumberColumn(format="%.1f")})
 
         DIRS, DIR_COLORS = ["Inbound", "Outbound"], [BLUE, ORANGE]
         left, right = st.columns(2, gap="medium")
         with left:
             with st.container(border=True):
-                st.markdown("#### Calls per day")
-                daily = talked.groupby(["date", "direction"]).size().rename("calls").reset_index()
-                st.altair_chart(alt.Chart(daily).mark_bar().encode(
-                    x=alt.X("yearmonthdate(date):O", title=None, axis=alt.Axis(format="%b %d", labelAngle=-45)),
-                    y=alt.Y("calls:Q", title="Calls"),
+                st.markdown("#### Average calls by weekday")
+                WEEK = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                days_per_wd = talked.groupby("weekday").date.nunique()          # e.g. how many Mondays had calls
+                wd = talked.groupby(["weekday", "direction"]).size().rename("total").reset_index()
+                wd["days"] = wd.weekday.map(days_per_wd)
+                wd["calls"] = (wd.total / wd.days).round(1)
+                wd["order"] = (wd.direction == "Outbound").astype(int)
+                wd_tot = wd.groupby("weekday").calls.sum().round(0).rename("sum").reset_index()
+                x = alt.X("weekday:N", sort=WEEK, title=None, axis=alt.Axis(labelAngle=0, labelExpr="slice(datum.label, 0, 3)"))
+                st.altair_chart((alt.Chart(wd).mark_bar().encode(
+                    x=x, y=alt.Y("calls:Q", title="Avg calls per day"),
                     color=alt.Color("direction:N", title=None, legend=alt.Legend(orient="top"),
                                     scale=alt.Scale(domain=DIRS, range=DIR_COLORS)),
-                    tooltip=[alt.Tooltip("yearmonthdate(date):O", title="Day", format="%a %b %d"),
-                             alt.Tooltip("direction:N", title="Direction"), "calls"],
+                    order=alt.Order("order:Q"),
+                    tooltip=[alt.Tooltip("weekday:N", title="Weekday"), alt.Tooltip("direction:N", title="Direction"),
+                             alt.Tooltip("calls:Q", title="Avg per day"), alt.Tooltip("total:Q", title="Total calls", format=","),
+                             alt.Tooltip("days:Q", title="Days")])
+                    + alt.Chart(wd_tot).mark_text(dy=-8, fontWeight="bold", color=INK).encode(
+                        x=x, y="sum:Q", text=alt.Text("sum:Q", format=",.0f"))
                 ).properties(height=260), width="stretch")
+                st.caption("Each bar = average connected calls on that weekday "
+                           "(e.g. all Monday calls ÷ number of Mondays with calls).")
         with right:
             with st.container(border=True):
                 st.markdown("#### Calls by hour of day")
