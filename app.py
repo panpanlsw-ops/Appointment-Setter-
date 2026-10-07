@@ -275,6 +275,7 @@ def company_data(tabs):
         "active": has_apt & ~cancelled,
         "cancelled": has_apt & cancelled,
         "ordered": text(d[c["order"]]) != "",
+        "status_text": status,
     })
     no_owner = int((rows.person == "").sum())
     # Orders have no date of their own: use the appointment date, or the lead date if no appointment
@@ -957,7 +958,9 @@ with tab_sales:
             sub = R[R[flag] & R[key].isin(reps)]
             return sub.groupby(key).lead.nunique()
 
+        R = R.assign(is_any_apt=R.is_apt | R.is_cancel)
         t = pd.DataFrame({"Leads": per_rep("is_lead", "owner"),
+                          "All appointments": per_rep("is_any_apt", "apt_by"),
                           "Appointments": per_rep("is_apt", "apt_by"),
                           "Cancelled": per_rep("is_cancel", "apt_by"),
                           "Orders": per_rep("is_order", "owner")}).reindex(reps).fillna(0).astype(int)
@@ -968,7 +971,8 @@ with tab_sales:
         t["Apt / Leads vs setters"] = t["Apt / Leads"] - setters["Apt / Leads"]
         t["Order / Leads vs setters"] = t["Order / Leads"] - setters["Order / Leads"]
         t = t.sort_values(["Leads", "Appointments", "Orders"], ascending=False)
-        t = t[["Branch", "Leads", "Appointments", "Cancelled", "Orders",
+        t = t.rename(columns={"Appointments": "Set up (active)"})
+        t = t[["Branch", "Leads", "All appointments", "Set up (active)", "Cancelled", "Orders",
                "Apt / Leads", "Apt / Leads vs setters", "Order / Leads", "Order / Leads vs setters"]]
         t.index.name = "Sales rep"
 
@@ -1004,18 +1008,24 @@ with tab_sales:
                        f"▼ −{fmt_pct(setters['Apt / Leads'])}. ▲ blue = better than setters, ▼ orange = worse.")
             # Rows sorted by orders, then two summary rows like the design
             show = t.copy()
+
+            def as_row(m):
+                d = m.to_dict()
+                d["All appointments"] = d["Appointments"] + d["Cancelled"]
+                d["Set up (active)"] = d.pop("Appointments")
+                return d
             summary = pd.DataFrame([
-                {"Branch": "", **sales_tot.to_dict(),
+                {"Branch": "", **as_row(sales_tot),
                  "Apt / Leads vs setters": sales_tot["Apt / Leads"] - setters["Apt / Leads"],
                  "Order / Leads vs setters": sales_tot["Order / Leads"] - setters["Order / Leads"]},
-                {"Branch": "", **setters.to_dict(),
+                {"Branch": "", **as_row(setters),
                  "Apt / Leads vs setters": np.nan, "Order / Leads vs setters": np.nan},
-                {"Branch": "", **company.to_dict(),
+                {"Branch": "", **as_row(company),
                  "Apt / Leads vs setters": company["Apt / Leads"] - setters["Apt / Leads"],
                  "Order / Leads vs setters": company["Order / Leads"] - setters["Order / Leads"]},
             ], index=["All sales reps", "Appointment setters", scope])
             show = pd.concat([show, summary[show.columns]])
-            for col in ["Leads", "Appointments", "Cancelled", "Orders"]:
+            for col in ["Leads", "All appointments", "Set up (active)", "Cancelled", "Orders"]:
                 show[col] = show[col].astype(int)
             show.index.name = "Sales rep"
 
@@ -1041,7 +1051,7 @@ with tab_sales:
             show = show.rename(columns={"Apt / Leads vs setters": a_col, "Order / Leads vs setters": o_col})
             diff_cols = [a_col, o_col]
             styled = (show.style
-                      .format({**{c: "{:,.0f}" for c in ["Leads", "Appointments", "Cancelled", "Orders"]},
+                      .format({**{c: "{:,.0f}" for c in ["Leads", "All appointments", "Set up (active)", "Cancelled", "Orders"]},
                                **{c: fmt_pct for c in ["Apt / Leads", "Order / Leads"]},
                                **{c: fmt_diff for c in diff_cols}})
                       .map(diff_style, subset=diff_cols)
@@ -1049,6 +1059,27 @@ with tab_sales:
             st.dataframe(styled, height=min(38 * (len(show) + 1) + 4, 680))
             st.download_button("Download CSV", t.to_csv().encode("utf-8-sig"),
                                file_name=f"sales_vs_setters_{s:%Y%m%d}_{e:%Y%m%d}.csv", mime="text/csv")
+
+        with st.container(border=True):
+            st.markdown("#### Appointments by sales rep (detail)")
+            st.caption("Every appointment counted in the table above, one row per lead, so you can check a rep's numbers.")
+            who = st.selectbox("Sales rep", ["All sales reps"] + list(t.index), key="sales_apt_rep")
+            apt_list = R[R.is_any_apt & R.apt_by.isin(reps if who == "All sales reps" else [who])]
+            apt_list = (apt_list.sort_values("apt_date")
+                        .drop_duplicates("lead", keep="last")
+                        .assign(**{"Set up on": lambda x: x.apt_date.dt.strftime("%m/%d/%Y %H:%M"),
+                                   "Status": lambda x: np.where(x.cancelled, "Cancelled", "Set up"),
+                                   "Ordered": lambda x: np.where(x.ordered, "Yes", "")})
+                        .rename(columns={"lead": "Lead", "apt_by": "Set by (apt salesname)",
+                                         "apt_branch": "Branch", "owner": "Lead owner"})
+                        [["Lead", "Set by (apt salesname)", "Branch", "Lead owner", "Set up on", "Status", "Ordered"]]
+                        .sort_values("Set up on"))
+            n_set = int((apt_list.Status == "Set up").sum())
+            st.markdown(f"**{len(apt_list):,} appointments**: {n_set:,} set up, {len(apt_list) - n_set:,} cancelled")
+            st.dataframe(apt_list, hide_index=True, height=380)
+            st.download_button("Download this list", apt_list.to_csv(index=False).encode("utf-8-sig"),
+                               file_name=f"appointments_{who.replace(' ', '_')}_{s:%Y%m%d}_{e:%Y%m%d}.csv",
+                               mime="text/csv", key="sales_apt_dl")
 
         def vs_chart(metric):
             d = t[t.Leads >= CHART_MIN_LEADS].reset_index()[["Sales rep", metric]].dropna()
