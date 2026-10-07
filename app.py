@@ -739,7 +739,9 @@ with tab_calls:
         with st.container(border=True):
             st.markdown(f"#### Call list ({len(c):,} calls)")
             st.caption("The calls for the dates and people picked above, as they are in the sheet.")
-            raw_view = raw_calls.loc[c.index]
+            raw_view = raw_calls.loc[c.index].copy()
+            # Show the date only (the sheet may hold it as "2026-08-01 0:00:00")
+            raw_view[CALL_COLS["date"]] = c.datetime.dt.strftime("%m/%d/%Y").values
             st.download_button("Download CSV", raw_view.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"setter_calls_{s:%Y%m%d}_{e:%Y%m%d}.csv", mime="text/csv")
             st.dataframe(raw_view, hide_index=True, height=400)
