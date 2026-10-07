@@ -67,6 +67,7 @@ ALL_COLS = {
     "lead":        "leads_id",
     "lead_date":   "marketing date",       # when the lead was created
     "lead_by":     "mark_salesname",       # who created the lead
+    "owner":       "leads_owner",          # the sales rep who owns the lead (Sales vs setters table)
     "lead_branch": "mbranch",              # their department
     "apt_by":      "apt salesname",        # who set up the appointment
     "apt_branch":  "apt branch",           # their department
@@ -236,6 +237,13 @@ def setter_data(tabs):
     return leads, apts
 
 
+def clean_name(col):
+    """'Dori Priego - CDR' / 'Nathan Anderson-CDR' / '* House' -> 'Dori Priego' / 'Nathan Anderson' / 'House'.
+    Hyphenated last names like 'Garcia-Cano' are kept."""
+    return (text(col).str.replace(r"\s*(?:\s-|-\s|-(?=[A-Z]{2,}\b)).*$", "", regex=True)
+            .str.replace(r"^\*\s*", "", regex=True).str.strip())
+
+
 def company_data(tabs):
     """One row per lead from the all company tab. Each lead belongs to the person who created it
     (mark_salesname / mbranch); its appointment, cancellation and order are counted for that person."""
@@ -259,8 +267,11 @@ def company_data(tabs):
         # appointment date: first_created, or last_date when first_created is empty (e.g. cancelled only)
         "apt_date": to_dt(d[c["apt_date"]]).fillna(to_dt(d["last_date"]) if "last_date" in d.columns
                                                    else pd.Series(pd.NaT, index=d.index)),
-        "person": text(d[c["lead_by"]]),
+        "person": clean_name(d[c["lead_by"]]),        # who created the lead
         "branch": text(d[c["lead_branch"]]),
+        "owner": clean_name(d[c["owner"]]),           # who owns the lead
+        "apt_by": clean_name(d[c["apt_by"]]),         # who set the appointment
+        "apt_branch": text(d[c["apt_branch"]]),
         "active": has_apt & ~cancelled,
         "cancelled": has_apt & cancelled,
         "ordered": text(d[c["order"]]) != "",
@@ -536,6 +547,7 @@ def demo_tabs():
         "leads_id": al.index,
         "marketing date": al.created_date.dt.strftime("%Y-%m-%d").values,
         "mark_salesname": al.created_by.map(name_of).values,
+        "leads_owner": al.salesreps_id.map(name_of).fillna("").values + np.where(rng.random(len(al)) < 0.3, " - CDR", ""),
         "mbranch": branch(al.created_by.values),
         "apt salesname": np.where(has, fa.created_by.map(name_of), ""),
         "apt branch": np.where(has, branch(fa.created_by.fillna("0").values), ""),
@@ -916,14 +928,43 @@ with tab_sales:
         in_scope = R.branch.isin(pick) | ((R.branch == "") & (NO_CREATOR in pick))
         company = metrics(R[in_scope])
 
-        # Benchmark: leads created by the appointment setters department
-        setters = metrics(R[is_setter_branch(R.branch)])
+        # Totals for a group: leads by `lead_m`, appointments + cancelled by `apt_m`, orders by `order_m`
+        def group_totals(lead_m, apt_m, order_m):
+            m = pd.Series({"Leads": R[R.is_lead & lead_m].lead.nunique(),
+                           "Appointments": R[R.is_apt & apt_m].lead.nunique(),
+                           "Cancelled": R[R.is_cancel & apt_m].lead.nunique(),
+                           "Orders": R[R.is_order & order_m].lead.nunique()}, dtype=float)
+            m["Apt / Leads"] = m.Appointments / m.Leads * 100 if m.Leads else np.nan
+            m["Order / Leads"] = m.Orders / m.Leads * 100 if m.Leads else np.nan
+            return m
 
-        # Sales reps: leads created by everyone else, in the chosen branches
-        Rs = R[R.branch.isin(pick) & (R.branch != SETTER_BRANCH) & (R.person != "")]
-        sales_tot = metrics(Rs)
-        t = metrics(Rs, by="person")
-        t.insert(0, "Branch", Rs.groupby("person").branch.agg(lambda b: b.mode().iat[0]).reindex(t.index))
+        # Benchmark: leads created by the setters department, appointments set by the setters department
+        setters = group_totals(is_setter_branch(R.branch), is_setter_branch(R.apt_branch), is_setter_branch(R.branch))
+
+        # Sales reps = everyone outside the setters department.
+        # Leads and orders count by leads_owner; appointments and cancellations by apt salesname.
+        setter_names = (set(R.loc[is_setter_branch(R.branch), "person"])
+                        | set(R.loc[is_setter_branch(R.apt_branch), "apt_by"])) - {""}
+        home = pd.concat([R.loc[R.apt_by != "", ["apt_by", "apt_branch"]].set_axis(["name", "branch"], axis=1),
+                          R.loc[R.person != "", ["person", "branch"]].set_axis(["name", "branch"], axis=1)])
+        home = home[home.branch != ""]
+        rep_branch = home.groupby("name").branch.agg(lambda b: b.mode().iat[0]) if len(home) else pd.Series(dtype=str)
+        names = (set(R.owner) | set(R.apt_by)) - setter_names - {""}
+        reps = sorted(n for n in names
+                      if rep_branch.get(n, "") in pick or (rep_branch.get(n, "") == "" and all_picked))
+
+        def per_rep(flag, key):
+            sub = R[R[flag] & R[key].isin(reps)]
+            return sub.groupby(key).lead.nunique()
+
+        t = pd.DataFrame({"Leads": per_rep("is_lead", "owner"),
+                          "Appointments": per_rep("is_apt", "apt_by"),
+                          "Cancelled": per_rep("is_cancel", "apt_by"),
+                          "Orders": per_rep("is_order", "owner")}).reindex(reps).fillna(0).astype(int)
+        t["Apt / Leads"] = pct(t.Appointments, t.Leads)
+        t["Order / Leads"] = pct(t.Orders, t.Leads)
+        t.insert(0, "Branch", pd.Series(reps, index=reps).map(lambda n: rep_branch.get(n, "")))
+        sales_tot = group_totals(R.owner.isin(reps), R.apt_by.isin(reps), R.owner.isin(reps))
         t["Apt / Leads vs setters"] = t["Apt / Leads"] - setters["Apt / Leads"]
         t["Order / Leads vs setters"] = t["Order / Leads"] - setters["Order / Leads"]
         t = t.sort_values(["Leads", "Appointments", "Orders"], ascending=False)
@@ -952,9 +993,10 @@ with tab_sales:
 
         with st.container(border=True):
             st.markdown("#### By sales rep")
-            st.caption(f"All numbers count unique leads_id. Leads by {ALL_COLS['lead_date']}, appointments and "
-                       f"cancellations by {ALL_COLS['apt_date']}, orders by the appointment date. "
-                       f"Each lead counts for the person who created it ({ALL_COLS['lead_by']}). "
+            st.caption(f"All numbers count unique leads_id. Each rep's Leads and Orders = leads where they are "
+                       f"{ALL_COLS['owner']}; Appointments and Cancelled = appointments where they are "
+                       f"{ALL_COLS['apt_by']}. Names are matched without suffixes like “- CDR”. "
+                       f"Leads by {ALL_COLS['lead_date']}, appointments by {ALL_COLS['apt_date']}, orders by the appointment date. "
                        f"The cards at the top follow the Branches filter. “{NO_CREATOR}” = leads where "
                        f"{ALL_COLS['lead_by']} is empty; they count in the cards unless excluded, never in a rep's row.")
             st.caption(f"Sorted by leads, then appointments, then orders. “vs setters” = the rep’s % minus the appointment setters’ %. "
