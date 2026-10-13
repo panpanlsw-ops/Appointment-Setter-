@@ -957,7 +957,7 @@ with tab_sales:
         hi = all_dates.max().date() if len(all_dates) else today
         is_setter_branch = lambda b: b.str.lower() == SETTER_BRANCH.lower()
         NO_CREATOR = "Leads with no creator (Web, etc.)"
-        sales_branches = sorted(set(c_rows.branch) - {"", SETTER_BRANCH})
+        sales_branches = sorted((set(c_rows.branch) | set(c_rows.owner_office)) - {"", SETTER_BRANCH})   # incl. Regional Offices
         branch_options = sales_branches + [SETTER_BRANCH, NO_CREATOR]
         f1, f2 = st.columns([3, 2])
         with f1:
@@ -1040,14 +1040,24 @@ with tab_sales:
         other = mode_branch(pd.concat([R[["apt_by", "apt_branch"]].set_axis(["name", "branch"], axis=1),
                                        R[["person", "branch"]].set_axis(["name", "branch"], axis=1)]))
         rep_branch = office.combine_first(other)       # fallback only if there is no Regional Office
+        # Each LEAD's branch = its Regional Office (fallback: the owner's usual branch).
+        # The Branches filter picks leads by this, so a rep with leads in two offices shows up
+        # under both, counting only the leads in the offices you picked.
+        R = R.assign(lead_office=R.owner_office.where(R.owner_office != "", R.owner.map(rep_branch).fillna("")))
+        in_pick = R.lead_office.isin(pick) | ((R.lead_office == "") & all_picked)
         # sales reps = leads owners, except people in the appointment setters department
         names = {n for n in set(R.owner) - {""} if rep_branch.get(n, "").lower() != SETTER_BRANCH.lower()}
-        reps = sorted(n for n in names
-                      if rep_branch.get(n, "") in pick or (rep_branch.get(n, "") == "" and all_picked))
+        # A rep is a NAME + REGIONAL OFFICE: two people with the same name in different offices are
+        # different reps. If a name appears in more than one office, its rows read "Name (Office)".
+        multi = R[R.owner.isin(names) & (R.lead_office != "")].groupby("owner").lead_office.nunique()
+        multi = set(multi[multi > 1].index)
+        R = R.assign(rep=np.where(R.owner.isin(multi) & (R.lead_office != ""),
+                                  R.owner + " (" + R.lead_office + ")", R.owner))
+        own = R.owner.isin(names) & in_pick
+        reps = sorted(set(R.loc[own, "rep"]))
 
         def per_rep(flag):
-            sub = R[R[flag] & R.owner.isin(reps)]
-            return sub.groupby("owner").lead.nunique()
+            return R[R[flag] & own].groupby("rep").lead.nunique()
 
         t = pd.DataFrame({"Leads": per_rep("is_lead"),
                           "All appointments": per_rep("is_any_apt"),
@@ -1056,12 +1066,14 @@ with tab_sales:
                           "Apts from setters": per_rep("is_setter_apt"),
                           "Orders": per_rep("is_order"),
                           "Installs": per_rep("is_install")}).reindex(reps).fillna(0).astype(int)
-        inst_rows = R[R.is_install & R.owner.isin(reps)].drop_duplicates(["owner", "lead"])
-        t["Installed $"] = inst_rows.groupby("owner").is_amount.sum().reindex(reps).fillna(0)
+        inst_rows = R[R.is_install & own].drop_duplicates(["rep", "lead"])
+        t["Installed $"] = inst_rows.groupby("rep").is_amount.sum().reindex(reps).fillna(0)
         t["Apt / Leads"] = pct(t.Appointments, t.Leads)
         t["Order / Leads"] = pct(t.Orders, t.Leads)
-        t.insert(0, "Branch", pd.Series(reps, index=reps).map(lambda n: rep_branch.get(n, "")))
-        own = R.owner.isin(reps)
+        # Branch column = the rep's Regional Office
+        offices = (R[own & (R.lead_office != "")].drop_duplicates(["rep", "lead"])
+                   .groupby("rep").lead_office.agg(lambda o: o.value_counts().index[0]))
+        t.insert(0, "Branch", offices.reindex(reps).fillna(""))
         sales_tot = group_totals(own, own, own, own)
         t = t.sort_values(["Leads", "Appointments", "Orders"], ascending=False)
         t = t.rename(columns={"Appointments": "Set up (active)"})
@@ -1093,7 +1105,8 @@ with tab_sales:
 
         with st.container(border=True):
             st.markdown("#### By sales rep")
-            st.caption(f"Sales rep = {ALL_COLS['owner']}. Every number in a rep's row is counted on the leads they own "
+            st.caption(f"Sales rep = {ALL_COLS['owner']} + {OFFICE_COL}: people with the same name in different "
+                       f"offices are separate rows, shown as “Name (Office)”. Every number in a rep's row is counted on the leads they own "
                        f"(unique leads_id): Leads, the appointments on those leads (All = Set up + Cancelled, whoever set "
                        f"them), Apts from setters = those appointments set up by the appointment setters department, "
                        f"and the Orders, Installs and Installed $ ({INSTALL_COLS['amount']}) on those leads. "
@@ -1141,7 +1154,7 @@ with tab_sales:
             st.markdown("#### Appointments by sales rep (detail)")
             st.caption("Every appointment counted in the table above, one row per lead, so you can check a rep's numbers.")
             who = st.selectbox("Sales rep", ["All sales reps"] + list(t.index), key="sales_apt_rep")
-            apt_list = R[R.is_any_apt & R.owner.isin(reps if who == "All sales reps" else [who])]
+            apt_list = R[R.is_any_apt & own & R.rep.isin(reps if who == "All sales reps" else [who])]
             apt_list = (apt_list.sort_values("apt_date")
                         .drop_duplicates("lead", keep="last")
                         .assign(**{"Set up on": lambda x: x.apt_date.dt.strftime("%m/%d/%Y %H:%M"),
