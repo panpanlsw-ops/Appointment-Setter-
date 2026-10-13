@@ -677,13 +677,23 @@ with tab_calls:
 
         inb, outb = c[c.direction == "Inbound"], c[c.direction == "Outbound"]
         in_missed, out_missed = int(inb.missed.sum()), int(outb.missed.sum())
+        def by_result(results):
+            sub = c[c.result.isin(results)]
+            n_in, n_out = int((sub.direction == "Inbound").sum()), int((sub.direction == "Outbound").sum())
+            return f"{len(sub):,}", [f"<b>{n_in:,}</b> inbound · <b>{n_out:,}</b> outbound"]
+        hung = [r for r in MISSED_RESULTS if r.lower().startswith("hung up")]
+        m_n, m_sub = by_result(["Missed Call"])
+        v_n, v_sub = by_result(["Sent to voicemail"])
+        h_n, h_sub = by_result(hung)
+        h_detail = ", ".join(f"{r.replace('Hung up ', '').strip('()')} {int((c.result == r).sum()):,}" for r in hung)
         kpi_strip([
-            ("Inbound calls (answered)", f"{len(inb) - in_missed:,}", BLUE,
-             [f"<b>{in_missed:,}</b> missed, not counted ({fmt_pct(in_missed / len(inb) * 100 if len(inb) else np.nan)} of inbound)"]),
-            ("Outbound calls (connected)", f"{len(outb) - out_missed:,}", ORANGE,
-             [f"<b>{out_missed:,}</b> no answer, not counted ({fmt_pct(out_missed / len(outb) * 100 if len(outb) else np.nan)} of outbound)"]),
+            ("Inbound", f"{len(inb) - in_missed:,}", BLUE, ["answered calls"]),
+            ("Outbound", f"{len(outb) - out_missed:,}", ORANGE, ["connected calls"]),
+            ("Missed", m_n, "#C9DD8F", m_sub),
+            ("Voicemail", v_n, "#C9DD8F", v_sub),
+            ("Hung up (hold)", h_n, "#C9DD8F", [h_detail]),
             ("Avg calls / day", f"{len(talked) / n_days:,.0f}" if n_days else "0", None,
-             [f"answered + connected calls", f"÷ {n_days} days with calls"]),
+             [f"inbound + outbound ÷ {n_days} days"]),
         ])
         st.caption("Everywhere on this page, Inbound and Outbound count only calls that connected; missed calls are "
                    "shown separately and are left out of totals, averages and talk time. "
