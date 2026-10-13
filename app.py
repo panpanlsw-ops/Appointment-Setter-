@@ -1032,11 +1032,13 @@ with tab_sales:
             sub = R[R[flag] & R[key].isin(reps)]
             return sub.groupby(key).lead.nunique()
 
-        R = R.assign(is_any_apt=R.is_apt | R.is_cancel)
+        R = R.assign(is_any_apt=R.is_apt | R.is_cancel,
+                     is_setter_apt=R.is_apt & is_setter_branch(R.apt_branch))   # set up by the setters department
         t = pd.DataFrame({"Leads": per_rep("is_lead", "owner"),
                           "All appointments": per_rep("is_any_apt", "apt_by"),
                           "Appointments": per_rep("is_apt", "apt_by"),
                           "Cancelled": per_rep("is_cancel", "apt_by"),
+                          "Apts from setters": per_rep("is_setter_apt", "owner"),
                           "Orders": per_rep("is_order", "owner"),
                           "Installs": per_rep("is_install", "is_rep")}).reindex(reps).fillna(0).astype(int)
         inst_rows = R[R.is_install & R.is_rep.isin(reps)].drop_duplicates(["is_rep", "lead"])
@@ -1045,12 +1047,10 @@ with tab_sales:
         t["Order / Leads"] = pct(t.Orders, t.Leads)
         t.insert(0, "Branch", pd.Series(reps, index=reps).map(lambda n: rep_branch.get(n, "")))
         sales_tot = group_totals(R.owner.isin(reps), R.apt_by.isin(reps), R.owner.isin(reps), R.is_rep.isin(reps))
-        t["Apt / Leads vs setters"] = t["Apt / Leads"] - setters["Apt / Leads"]
-        t["Order / Leads vs setters"] = t["Order / Leads"] - setters["Order / Leads"]
         t = t.sort_values(["Leads", "Appointments", "Orders"], ascending=False)
         t = t.rename(columns={"Appointments": "Set up (active)"})
-        t = t[["Branch", "Leads", "All appointments", "Set up (active)", "Cancelled", "Orders", "Installs", "Installed $",
-               "Apt / Leads", "Apt / Leads vs setters", "Order / Leads", "Order / Leads vs setters"]]
+        t = t[["Branch", "Leads", "All appointments", "Set up (active)", "Cancelled", "Apts from setters",
+               "Orders", "Installs", "Installed $", "Apt / Leads", "Order / Leads"]]
         t.index.name = "Sales rep"
 
         kpi_strip([
@@ -1078,15 +1078,15 @@ with tab_sales:
         with st.container(border=True):
             st.markdown("#### By sales rep")
             st.caption(f"All numbers count unique leads_id. Each rep's Leads and Orders = leads where they are "
-                       f"{ALL_COLS['owner']}; Appointments and Cancelled = appointments where they are "
+                       f"{ALL_COLS['owner']}; Apts from setters = active appointments on the rep's leads "
+                       f"({ALL_COLS['owner']}) that the appointment setters department set up "
+                       f"({ALL_COLS['apt_branch']} = {SETTER_BRANCH}); Appointments and Cancelled = appointments where they are "
                        f"{ALL_COLS['apt_by']}; Installs and Installed $ = installed systems where they are "
                        f"{INSTALL_COLS['rep']} (sales amount from {INSTALL_COLS['amount']}). Names are matched without suffixes like “- CDR”. "
                        f"Leads by {ALL_COLS['lead_date']}, appointments by {ALL_COLS['apt_date']}, orders by the appointment date. "
                        f"The cards at the top follow the Branches filter. “{NO_CREATOR}” = leads where "
                        f"{ALL_COLS['lead_by']} is empty; they count in the cards unless excluded, never in a rep's row.")
-            st.caption(f"Sorted by leads, then appointments, then orders. “vs setters” = the rep’s % minus the appointment setters’ %. "
-                       f"Example: a rep with Apt / Leads 0.0% vs setters {fmt_pct(setters['Apt / Leads'])} shows "
-                       f"▼ −{fmt_pct(setters['Apt / Leads'])}. ▲ green = better than setters, ▼ red = worse.")
+            st.caption("Sorted by leads, then appointments, then orders.")
             # Rows sorted by orders, then two summary rows like the design
             show = t.copy()
 
@@ -1095,29 +1095,16 @@ with tab_sales:
                 d["All appointments"] = d["Appointments"] + d["Cancelled"]
                 d["Set up (active)"] = d.pop("Appointments")
                 return d
+            setter_apts = lambda m: int(R[R.is_setter_apt & m].lead.nunique())
             summary = pd.DataFrame([
-                {"Branch": "", **as_row(sales_tot),
-                 "Apt / Leads vs setters": sales_tot["Apt / Leads"] - setters["Apt / Leads"],
-                 "Order / Leads vs setters": sales_tot["Order / Leads"] - setters["Order / Leads"]},
-                {"Branch": "", **as_row(setters),
-                 "Apt / Leads vs setters": np.nan, "Order / Leads vs setters": np.nan},
-                {"Branch": "", **as_row(company),
-                 "Apt / Leads vs setters": company["Apt / Leads"] - setters["Apt / Leads"],
-                 "Order / Leads vs setters": company["Order / Leads"] - setters["Order / Leads"]},
+                {"Branch": "", **as_row(sales_tot), "Apts from setters": setter_apts(R.owner.isin(reps))},
+                {"Branch": "", **as_row(setters), "Apts from setters": setter_apts(pd.Series(True, index=R.index))},
+                {"Branch": "", **as_row(company), "Apts from setters": setter_apts(in_scope.reindex(R.index, fill_value=False))},
             ], index=["All sales reps", "Appointment setters", scope])
             show = pd.concat([show, summary[show.columns]])
-            for col in ["Leads", "All appointments", "Set up (active)", "Cancelled", "Orders", "Installs"]:
+            for col in ["Leads", "All appointments", "Set up (active)", "Cancelled", "Apts from setters", "Orders", "Installs"]:
                 show[col] = show[col].astype(int)
             show.index.name = "Sales rep"
-
-            def fmt_diff(v):
-                return "–" if pd.isna(v) else f"{'▲ +' if v >= 0 else '▼ −'}{abs(v):.1f}%"
-
-            def diff_style(v):
-                if pd.isna(v):
-                    return ""
-                return ("color: #0A5E2E; background-color: #E2F2D6; font-weight: 600" if v >= 0
-                        else "color: #A10F25; background-color: #FBE3E6; font-weight: 600")
 
             def summary_rows(row):
                 if row.name in ("All sales reps", scope):
@@ -1126,17 +1113,11 @@ with tab_sales:
                     return [f"color: {BLUE}; font-weight: 600"] * len(row)
                 return [""] * len(row)
 
-            # Put the setters' % in the header so the math is visible
-            a_col = f"Apt / Leads vs setters ({fmt_pct(setters['Apt / Leads'])})"
-            o_col = f"Order / Leads vs setters ({fmt_pct(setters['Order / Leads'])})"
-            show = show.rename(columns={"Apt / Leads vs setters": a_col, "Order / Leads vs setters": o_col})
-            diff_cols = [a_col, o_col]
             styled = (show.style
-                      .format({**{c: "{:,.0f}" for c in ["Leads", "All appointments", "Set up (active)", "Cancelled", "Orders", "Installs"]},
+                      .format({**{c: "{:,.0f}" for c in ["Leads", "All appointments", "Set up (active)", "Cancelled",
+                                                         "Apts from setters", "Orders", "Installs"]},
                                "Installed $": "${:,.0f}",
-                               **{c: fmt_pct for c in ["Apt / Leads", "Order / Leads"]},
-                               **{c: fmt_diff for c in diff_cols}})
-                      .map(diff_style, subset=diff_cols)
+                               **{c: fmt_pct for c in ["Apt / Leads", "Order / Leads"]}})
                       .apply(summary_rows, axis=1))
             st.dataframe(styled, height=min(38 * (len(show) + 1) + 4, 680))
             st.download_button("Download CSV", t.to_csv().encode("utf-8-sig"),
