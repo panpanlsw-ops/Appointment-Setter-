@@ -87,18 +87,23 @@ EXCLUDE_REP_IDS = ["1261"]
 # LOOK
 # =====================================================================
 INK, MUTED, BLUE, ORANGE, RULE = "#1B2230", "#5A6474", "#1F5FBF", "#E8913F", "#D5DBE3"
+# LifeSource CRM colors for the header, tabs and buttons
+CRM_GREEN, CRM_GREEN_DARK, CRM_TAB, CRM_TAB_BORDER, CRM_RED = "#0E7A3C", "#0A5E2E", "#E2F2D6", "#A9CF95", "#C8102E"
 KINDS, KIND_COLORS = ["Inbound", "Outbound", "Missed"], ["#1F5FBF", "#E8913F", "#AEB8C6"]
 
 st.set_page_config(page_title="Appointment Setter Dashboard", layout="wide")
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&display=swap');
-.block-container {{ padding-top: 1.2rem; max-width: 1440px; }}
+.block-container {{ padding-top: 3.8rem; max-width: 1440px; }}
 .dash, .dash * {{ font-family: 'Archivo', 'Helvetica Neue', Helvetica, sans-serif; font-variant-numeric: tabular-nums; }}
-.topbar {{ background: {INK}; color: #F3F5F8; border-radius: 6px; padding: 22px 28px; margin-bottom: .6rem;
+.topbar {{ background: {CRM_GREEN}; color: #FFFFFF; border-radius: 6px; padding: 22px 28px; margin-bottom: .6rem;
+          border-bottom: 4px solid {CRM_RED};
           display: flex; align-items: baseline; gap: 14px; }}
-.topbar h1 {{ margin: 0; padding: 0; font-size: 30px; font-weight: 760; font-stretch: 115%; color: #F3F5F8; }}
-.topbar span {{ font-size: 13px; color: #AEB8C6; }}
+.topbar h1 {{ margin: 0 !important; padding: 2px 0 !important; line-height: 1.2 !important; font-size: 30px;
+             font-weight: 760; font-stretch: 115%; color: #FFFFFF; }}
+.topbar > span {{ font-size: 13px; color: #D7EBCB; }}
+.topbar h1 span {{ font-size: inherit; color: inherit; }}
 .kpis {{ display: grid; background: #fff; border: 1px solid {RULE}; border-radius: 6px; margin: .4rem 0 1rem; }}
 .kpi {{ padding: 18px 24px; border-left: 1px solid #E3E8EE; display: flex; flex-direction: column; gap: 6px; }}
 .kpi:first-child {{ border-left: 0; }}
@@ -121,7 +126,17 @@ st.markdown(f"""
 .cmp .v {{ font-size: 48px; font-weight: 760; font-stretch: 110%; line-height: 1; color: {INK}; }}
 .cmp .v.blue {{ color: {BLUE}; }}
 .cmp .l {{ font-size: 14px; color: {MUTED}; margin-top: 4px; }}
-div[data-testid="stTabs"] button p {{ font-size: 16px; }}
+/* Tabs styled like the CRM: light green tabs, dark green for the open one (works on old and new Streamlit) */
+div[data-testid="stTabs"] [role="tablist"] {{ gap: 6px; border-bottom: 3px solid {CRM_GREEN}; }}
+div[data-testid="stTabs"] [data-baseweb="tab-highlight"],
+div[data-testid="stTabs"] [data-baseweb="tab-border"],
+div[data-testid="stTabs"] .react-aria-SelectionIndicator {{ display: none; }}
+div[data-testid="stTabs"] [role="tab"] {{ background: {CRM_TAB}; border: 1px solid {CRM_TAB_BORDER};
+    border-bottom: none; border-radius: 8px 8px 0 0; padding: 10px 26px; margin: 0; }}
+div[data-testid="stTabs"] [role="tab"] p {{ font-size: 16px; color: {INK}; }}
+div[data-testid="stTabs"] [role="tab"]:hover {{ background: #D2EAC1; }}
+div[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{ background: {CRM_GREEN}; border-color: {CRM_GREEN}; }}
+div[data-testid="stTabs"] [role="tab"][aria-selected="true"] p {{ color: #FFFFFF; font-weight: 600; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -443,6 +458,34 @@ def fmt_pct(v):
     return "–" if pd.isna(v) else f"{v:.1f}%"
 
 
+def period_picker(key, lo, hi):
+    """Pick a whole month or a week of a month instead of exact dates.
+    Weeks follow the days of the month: Week 1 = 1st–7th, Week 2 = 8th–14th, Week 3 = 15th–21st,
+    Week 4 = 22nd–28th, Week 5 = 29th–end of month. Returns (start, end)."""
+    months = pd.period_range(lo, hi, freq="M")[::-1]                   # newest first
+    c1, c2 = st.columns([1, 2])
+    view = c1.radio("Show by", ["Month", "Week", "All dates"], horizontal=True, key=f"{key}_view")
+    if view == "All dates":
+        c2.markdown(f'<div style="padding-top:30px;color:{MUTED}">{lo:%b %d, %Y} – {hi:%b %d, %Y}</div>',
+                    unsafe_allow_html=True)
+        return lo, hi
+    if view == "Month":
+        labels = {f"{m.strftime('%B %Y')}": (m.start_time.date(), m.end_time.date()) for m in months}
+    else:
+        labels = {}
+        for m in months:
+            last_day = m.end_time.day
+            for w in range(5, 0, -1):                                  # newest week first
+                a = m.start_time.date().replace(day=7 * (w - 1) + 1)
+                b = m.start_time.date().replace(day=min(7 * w if w < 5 else last_day, last_day))
+                if a > b or b < lo or a > hi:
+                    continue
+                labels[f"{m.strftime('%B %Y')} · Week {w} ({a:%b} {a.day}–{b.day})"] = (a, b)
+    choice = c2.selectbox("Month" if view == "Month" else "Week", list(labels), key=f"{key}_{view}")
+    a, b = labels[choice]
+    return max(a, lo), min(b, hi)
+
+
 QUICK_RANGES = ["All dates", "This month", "Last month", "Last 7 days", "Last 30 days"]
 
 
@@ -620,7 +663,7 @@ with tab_calls:
         lo, hi = calls.datetime.min().date(), calls.datetime.max().date()
         f1, f2 = st.columns([3, 2])
         with f1:
-            s, e = date_picker(f"calls_range_{lo}_{hi}", lo, hi, lo, hi)   # first to last call in the sheet
+            s, e = period_picker("calls_period", lo, hi)
         with f2:
             people = sorted(calls.person.unique())
             pick = checklist_filter("People", people, key="calls_people")
@@ -768,15 +811,6 @@ with tab_calls:
                 st.caption("Each bar = how many calls were missed during that hour. "
                            "Most missed calls: " + ", ".join(f"{int(h)}:00 ({n})" for h, n in zip(worst.hour, worst.total)) + ".")
 
-        with st.container(border=True):
-            st.markdown(f"#### Call list ({len(c):,} calls)")
-            st.caption("The calls for the dates and people picked above, as they are in the sheet.")
-            raw_view = raw_calls.loc[c.index].copy()
-            # Show the date only (the sheet may hold it as "2026-08-01 0:00:00")
-            raw_view[CALL_COLS["date"]] = c.datetime.dt.strftime("%m/%d/%Y").values
-            st.download_button("Download CSV", raw_view.to_csv(index=False).encode("utf-8-sig"),
-                               file_name=f"setter_calls_{s:%Y%m%d}_{e:%Y%m%d}.csv", mime="text/csv")
-            st.dataframe(raw_view, hide_index=True, height=400)
 
 # ---------------------------------------------------------------- TAB 2
 with tab_setters:
