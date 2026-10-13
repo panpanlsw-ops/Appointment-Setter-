@@ -75,6 +75,10 @@ ALL_COLS = {
     "status":      "final_status",         # "Set up" or "Cancelled"
     "order":       ["orders salesrepsname", "salesreps_name", "sales amount"],  # first one found; any value = order
 }
+# Each rep's branch in the By sales rep table comes from this column (optional).
+# Values like "Andrew Higgins - Pasadena Team - Pasadena" are cut to the part after the last "-" ("Pasadena").
+OFFICE_COL = "Regional Office"
+
 # Installs (optional columns in the all company tab)
 INSTALL_COLS = {"amount": "IS amount", "rep": "IS reps"}   # installed system: sales amount + who sold it
 CHART_MIN_LEADS = 5   # charts only show sales reps with at least this many leads
@@ -273,6 +277,11 @@ def clean_name(col):
             .str.replace(r"^\*\s*", "", regex=True).str.strip())
 
 
+def clean_office(col):
+    """'Nathalie Garcia- Sales Director Team - Customer Development' -> 'Customer Development'."""
+    return text(col).str.rsplit("-", n=1).str[-1].str.strip()
+
+
 def company_data(tabs):
     """One row per lead from the all company tab. Each lead belongs to the person who created it
     (mark_salesname / mbranch); its appointment, cancellation and order are counted for that person."""
@@ -301,6 +310,7 @@ def company_data(tabs):
         "owner": clean_name(d[c["owner"]]),           # who owns the lead
         "apt_by": clean_name(d[c["apt_by"]]),         # who set the appointment
         "apt_branch": text(d[c["apt_branch"]]),
+        "owner_office": clean_office(d[OFFICE_COL]) if OFFICE_COL in d.columns else "",   # the owner's branch
         "active": has_apt & ~cancelled,
         "cancelled": has_apt & cancelled,
         "ordered": text(d[c["order"]]) != "",
@@ -1020,10 +1030,15 @@ with tab_sales:
         # Leads and orders count by leads_owner; appointments and cancellations by apt salesname.
         setter_names = (set(R.loc[is_setter_branch(R.branch), "person"])
                         | set(R.loc[is_setter_branch(R.apt_branch), "apt_by"])) - {""}
-        home = pd.concat([R.loc[R.apt_by != "", ["apt_by", "apt_branch"]].set_axis(["name", "branch"], axis=1),
-                          R.loc[R.person != "", ["person", "branch"]].set_axis(["name", "branch"], axis=1)])
-        home = home[home.branch != ""]
-        rep_branch = home.groupby("name").branch.agg(lambda b: b.mode().iat[0]) if len(home) else pd.Series(dtype=str)
+        # Each rep's branch: their Regional Office (from leads they own); if they own no leads,
+        # the branch on appointments they set or leads they created
+        def mode_branch(df):
+            df = df[(df.name != "") & (df.branch != "")]
+            return df.groupby("name").branch.agg(lambda b: b.mode().iat[0]) if len(df) else pd.Series(dtype=str)
+        office = mode_branch(R[["owner", "owner_office"]].set_axis(["name", "branch"], axis=1))
+        other = mode_branch(pd.concat([R[["apt_by", "apt_branch"]].set_axis(["name", "branch"], axis=1),
+                                       R[["person", "branch"]].set_axis(["name", "branch"], axis=1)]))
+        rep_branch = office.combine_first(other)
         names = (set(R.owner) | set(R.apt_by) | set(R.is_rep)) - setter_names - {""}
         reps = sorted(n for n in names
                       if rep_branch.get(n, "") in pick or (rep_branch.get(n, "") == "" and all_picked))
