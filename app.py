@@ -39,7 +39,7 @@ APT_COLS = {
     "setter": "apt salesname",       # setter who set it up
     "branch": "apt branch",          # department of the person who set it up
     "status": "final_status",        # "Set up" or "Cancelled"
-    "order":  "orders salesrepsname",  # any value here = the customer placed an order
+    "order":  ["orders salesrepsname", "salesreps_name", "sales amount"],  # first one found; any value = order
 }
 CANCELLED_VALUES = ["cancelled", "canceled"]   # status values that count as cancelled (any case)
 # Only leads and appointments made by this department count on the Setter performance tab.
@@ -73,8 +73,10 @@ ALL_COLS = {
     "apt_branch":  "apt branch",           # their department
     "apt_date":    "first_created",        # when the appointment was set up
     "status":      "final_status",         # "Set up" or "Cancelled"
-    "order":       "orders salesrepsname", # any value here = the customer placed an order
+    "order":       ["orders salesrepsname", "salesreps_name", "sales amount"],  # first one found; any value = order
 }
+# Installs (optional columns in the all company tab)
+INSTALL_COLS = {"amount": "IS amount", "rep": "IS reps"}   # installed system: sales amount + who sold it
 CHART_MIN_LEADS = 5   # charts only show sales reps with at least this many leads
 
 # Used only to build demo data
@@ -199,6 +201,17 @@ def text(s):
     return s.mask(s.str.lower().isin(["", "nan", "none", "null", "<na>"]), "")
 
 
+def resolve_cols(df, cols):
+    """Column names to use: a list means 'the first of these that exists in the sheet'."""
+    out = {}
+    for k, v in cols.items():
+        if isinstance(v, list):
+            out[k] = next((x for x in v if x in df.columns), v[0])
+        else:
+            out[k] = v
+    return out
+
+
 def to_dt(s):
     return pd.to_datetime(text(s).replace("", None), errors="coerce", format="mixed")
 
@@ -211,23 +224,24 @@ def setter_data(tabs):
         if len(tabs[tab].columns) == 0:
             raise ValueError(f'The "{tab}" worksheet is empty. Re-run the notebook cell that writes it, '
                              f'then click Refresh now.')
-        miss = missing_cols(tabs[tab], cols.values())
+        miss = missing_cols(tabs[tab], resolve_cols(tabs[tab], cols).values())
         if miss:
             raise ValueError(f'The "{tab}" worksheet is missing {miss}. Headers found: {list(tabs[tab].columns)}. '
                              f"Fix the headers in the sheet or the names in app.py.")
     l, a = tabs[LEADS_TAB], tabs[APT_TAB]
+    A_COLS = resolve_cols(a, APT_COLS)
     # Keep only rows made by the appointment setters department
     l = l[text(l[LEADS_COLS["branch"]]).str.lower() == SETTER_BRANCH.lower()]
-    a = a[text(a[APT_COLS["branch"]]).str.lower() == SETTER_BRANCH.lower()]
+    a = a[text(a[A_COLS["branch"]]).str.lower() == SETTER_BRANCH.lower()]
     leads = pd.DataFrame({"lead": text(l[LEADS_COLS["lead"]]), "date": to_dt(l[LEADS_COLS["date"]]),
                           "setter": text(l[LEADS_COLS["setter"]])})
-    status = text(a[APT_COLS["status"]])
+    status = text(a[A_COLS["status"]])
     apts = pd.DataFrame({
-        "lead": text(a[APT_COLS["lead"]]),
-        "date": to_dt(a[APT_COLS["date"]]),
-        "setter": text(a[APT_COLS["setter"]]),
+        "lead": text(a[A_COLS["lead"]]),
+        "date": to_dt(a[A_COLS["date"]]),
+        "setter": text(a[A_COLS["setter"]]),
         "status": np.where(status.str.lower().isin(CANCELLED_VALUES), "Cancelled", "Active"),
-        "ordered": text(a[APT_COLS["order"]]) != "",
+        "ordered": text(a[A_COLS["order"]]) != "",
     })
     extra = [c for c in ("path", "path_detail") if c in a.columns]
     for c in extra:
@@ -253,11 +267,11 @@ def company_data(tabs):
     if d.empty and len(d.columns) == 0:
         raise ValueError(f'The "{ALL_TAB}" worksheet is empty. Re-run the notebook cell that writes it, '
                          f'then click Refresh now.')
-    miss = missing_cols(d, ALL_COLS.values())
+    c = resolve_cols(d, ALL_COLS)
+    miss = missing_cols(d, c.values())
     if miss:
         raise ValueError(f'The "{ALL_TAB}" worksheet is missing {miss}. Headers found: {list(d.columns)}. '
                          f"Fix the headers in the sheet or the names in app.py.")
-    c = ALL_COLS
     status = text(d[c["status"]])
     has_apt = (text(d[c["apt_by"]]) != "") | (status != "")
     cancelled = status.str.lower().isin(CANCELLED_VALUES)
@@ -276,7 +290,12 @@ def company_data(tabs):
         "cancelled": has_apt & cancelled,
         "ordered": text(d[c["order"]]) != "",
         "status_text": status,
+        # installs: IS amount has a value; IS reps = who sold the install
+        "is_amount": (pd.to_numeric(text(d[INSTALL_COLS["amount"]]).str.replace(r"[$,]", "", regex=True), errors="coerce")
+                      if INSTALL_COLS["amount"] in d.columns else pd.Series(np.nan, index=d.index)),
+        "is_rep": clean_name(d[INSTALL_COLS["rep"]]) if INSTALL_COLS["rep"] in d.columns else "",
     })
+    rows["installed"] = rows.is_amount.notna()
     no_owner = int((rows.person == "").sum())
     # Orders have no date of their own: use the appointment date, or the lead date if no appointment
     rows["order_date"] = rows.apt_date.fillna(rows.date)
@@ -903,8 +922,14 @@ with tab_sales:
             is_apt=R.active & within("apt_date"),                 # active appointment set in range
             is_cancel=R.cancelled & within("apt_date"),           # cancelled appointment set in range
             is_order=R.ordered & within("order_date"),            # order, by appointment date
+            is_install=R.installed & within("order_date"),        # installed system, same date as the order
         )
-        R = R[R.is_lead | R.is_apt | R.is_cancel | R.is_order]
+        R = R[R.is_lead | R.is_apt | R.is_cancel | R.is_order | R.is_install]
+
+        def installs(df):
+            """(number of installed leads, total IS amount), each lead counted once."""
+            sub = df[df.is_install].drop_duplicates("lead")
+            return sub.lead.nunique(), float(sub.is_amount.sum())
 
         def metrics(D, by=None):
             """Unique leads, active appointments, cancelled and orders, overall or per `by` column."""
@@ -912,8 +937,10 @@ with tab_sales:
                 sub = df[df[flag]]
                 return sub.lead.nunique() if by is None else sub.groupby(by).lead.nunique()
             if by is None:
+                n_inst, amt = installs(D)
                 m = pd.Series({"Leads": count(D, "is_lead"), "Appointments": count(D, "is_apt"),
-                               "Cancelled": count(D, "is_cancel"), "Orders": count(D, "is_order")}, dtype=float)
+                               "Cancelled": count(D, "is_cancel"), "Orders": count(D, "is_order"),
+                               "Installs": n_inst, "Installed $": amt}, dtype=float)
                 m["Apt / Leads"] = m.Appointments / m.Leads * 100 if m.Leads else np.nan
                 m["Order / Leads"] = m.Orders / m.Leads * 100 if m.Leads else np.nan
                 return m
@@ -930,17 +957,20 @@ with tab_sales:
         company = metrics(R[in_scope])
 
         # Totals for a group: leads by `lead_m`, appointments + cancelled by `apt_m`, orders by `order_m`
-        def group_totals(lead_m, apt_m, order_m):
+        def group_totals(lead_m, apt_m, order_m, inst_m):
+            n_inst, amt = installs(R[inst_m])
             m = pd.Series({"Leads": R[R.is_lead & lead_m].lead.nunique(),
                            "Appointments": R[R.is_apt & apt_m].lead.nunique(),
                            "Cancelled": R[R.is_cancel & apt_m].lead.nunique(),
-                           "Orders": R[R.is_order & order_m].lead.nunique()}, dtype=float)
+                           "Orders": R[R.is_order & order_m].lead.nunique(),
+                           "Installs": n_inst, "Installed $": amt}, dtype=float)
             m["Apt / Leads"] = m.Appointments / m.Leads * 100 if m.Leads else np.nan
             m["Order / Leads"] = m.Orders / m.Leads * 100 if m.Leads else np.nan
             return m
 
         # Benchmark: leads created by the setters department, appointments set by the setters department
-        setters = group_totals(is_setter_branch(R.branch), is_setter_branch(R.apt_branch), is_setter_branch(R.branch))
+        setters = group_totals(is_setter_branch(R.branch), is_setter_branch(R.apt_branch), is_setter_branch(R.branch),
+                               is_setter_branch(R.branch))   # setters: installs on leads they created
 
         # Sales reps = everyone outside the setters department.
         # Leads and orders count by leads_owner; appointments and cancellations by apt salesname.
@@ -950,7 +980,7 @@ with tab_sales:
                           R.loc[R.person != "", ["person", "branch"]].set_axis(["name", "branch"], axis=1)])
         home = home[home.branch != ""]
         rep_branch = home.groupby("name").branch.agg(lambda b: b.mode().iat[0]) if len(home) else pd.Series(dtype=str)
-        names = (set(R.owner) | set(R.apt_by)) - setter_names - {""}
+        names = (set(R.owner) | set(R.apt_by) | set(R.is_rep)) - setter_names - {""}
         reps = sorted(n for n in names
                       if rep_branch.get(n, "") in pick or (rep_branch.get(n, "") == "" and all_picked))
 
@@ -963,16 +993,19 @@ with tab_sales:
                           "All appointments": per_rep("is_any_apt", "apt_by"),
                           "Appointments": per_rep("is_apt", "apt_by"),
                           "Cancelled": per_rep("is_cancel", "apt_by"),
-                          "Orders": per_rep("is_order", "owner")}).reindex(reps).fillna(0).astype(int)
+                          "Orders": per_rep("is_order", "owner"),
+                          "Installs": per_rep("is_install", "is_rep")}).reindex(reps).fillna(0).astype(int)
+        inst_rows = R[R.is_install & R.is_rep.isin(reps)].drop_duplicates(["is_rep", "lead"])
+        t["Installed $"] = inst_rows.groupby("is_rep").is_amount.sum().reindex(reps).fillna(0)
         t["Apt / Leads"] = pct(t.Appointments, t.Leads)
         t["Order / Leads"] = pct(t.Orders, t.Leads)
         t.insert(0, "Branch", pd.Series(reps, index=reps).map(lambda n: rep_branch.get(n, "")))
-        sales_tot = group_totals(R.owner.isin(reps), R.apt_by.isin(reps), R.owner.isin(reps))
+        sales_tot = group_totals(R.owner.isin(reps), R.apt_by.isin(reps), R.owner.isin(reps), R.is_rep.isin(reps))
         t["Apt / Leads vs setters"] = t["Apt / Leads"] - setters["Apt / Leads"]
         t["Order / Leads vs setters"] = t["Order / Leads"] - setters["Order / Leads"]
         t = t.sort_values(["Leads", "Appointments", "Orders"], ascending=False)
         t = t.rename(columns={"Appointments": "Set up (active)"})
-        t = t[["Branch", "Leads", "All appointments", "Set up (active)", "Cancelled", "Orders",
+        t = t[["Branch", "Leads", "All appointments", "Set up (active)", "Cancelled", "Orders", "Installs", "Installed $",
                "Apt / Leads", "Apt / Leads vs setters", "Order / Leads", "Order / Leads vs setters"]]
         t.index.name = "Sales rep"
 
@@ -981,6 +1014,8 @@ with tab_sales:
             ("Appointments", f"{int(company.Appointments):,}", BLUE),
             ("Cancelled", f"{int(company.Cancelled):,}", "#AEB8C6"),
             ("Orders", f"{int(company.Orders):,}", ORANGE),
+            ("Installs", f"{int(company.Installs):,}", "#2CB5A6"),
+            ("Installed $", f"${company['Installed $']:,.0f}", "#2CB5A6"),
         ])
 
         st.markdown(f"""
@@ -999,7 +1034,8 @@ with tab_sales:
             st.markdown("#### By sales rep")
             st.caption(f"All numbers count unique leads_id. Each rep's Leads and Orders = leads where they are "
                        f"{ALL_COLS['owner']}; Appointments and Cancelled = appointments where they are "
-                       f"{ALL_COLS['apt_by']}. Names are matched without suffixes like “- CDR”. "
+                       f"{ALL_COLS['apt_by']}; Installs and Installed $ = installed systems where they are "
+                       f"{INSTALL_COLS['rep']} (sales amount from {INSTALL_COLS['amount']}). Names are matched without suffixes like “- CDR”. "
                        f"Leads by {ALL_COLS['lead_date']}, appointments by {ALL_COLS['apt_date']}, orders by the appointment date. "
                        f"The cards at the top follow the Branches filter. “{NO_CREATOR}” = leads where "
                        f"{ALL_COLS['lead_by']} is empty; they count in the cards unless excluded, never in a rep's row.")
@@ -1025,7 +1061,7 @@ with tab_sales:
                  "Order / Leads vs setters": company["Order / Leads"] - setters["Order / Leads"]},
             ], index=["All sales reps", "Appointment setters", scope])
             show = pd.concat([show, summary[show.columns]])
-            for col in ["Leads", "All appointments", "Set up (active)", "Cancelled", "Orders"]:
+            for col in ["Leads", "All appointments", "Set up (active)", "Cancelled", "Orders", "Installs"]:
                 show[col] = show[col].astype(int)
             show.index.name = "Sales rep"
 
@@ -1051,7 +1087,8 @@ with tab_sales:
             show = show.rename(columns={"Apt / Leads vs setters": a_col, "Order / Leads vs setters": o_col})
             diff_cols = [a_col, o_col]
             styled = (show.style
-                      .format({**{c: "{:,.0f}" for c in ["Leads", "All appointments", "Set up (active)", "Cancelled", "Orders"]},
+                      .format({**{c: "{:,.0f}" for c in ["Leads", "All appointments", "Set up (active)", "Cancelled", "Orders", "Installs"]},
+                               "Installed $": "${:,.0f}",
                                **{c: fmt_pct for c in ["Apt / Leads", "Order / Leads"]},
                                **{c: fmt_diff for c in diff_cols}})
                       .map(diff_style, subset=diff_cols)
