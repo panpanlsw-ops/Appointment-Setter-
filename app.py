@@ -86,10 +86,10 @@ EXCLUDE_REP_IDS = ["1261"]
 # =====================================================================
 # LOOK
 # =====================================================================
-INK, MUTED, BLUE, ORANGE, RULE = "#1B2230", "#5A6474", "#1F5FBF", "#E8913F", "#D5DBE3"
+INK, MUTED, BLUE, ORANGE, RULE = "#1B2230", "#5A6474", "#0E7A3C", "#8DC63F", "#D5DBE3"
 # LifeSource CRM colors for the header, tabs and buttons
 CRM_GREEN, CRM_GREEN_DARK, CRM_TAB, CRM_TAB_BORDER, CRM_RED = "#0E7A3C", "#0A5E2E", "#E2F2D6", "#A9CF95", "#C8102E"
-KINDS, KIND_COLORS = ["Inbound", "Outbound", "Missed"], ["#1F5FBF", "#E8913F", "#AEB8C6"]
+KINDS, KIND_COLORS = ["Inbound", "Outbound", "Missed"], ["#0E7A3C", "#8DC63F", "#AEB8C6"]
 
 st.set_page_config(page_title="Appointment Setter Dashboard", layout="wide")
 st.markdown(f"""
@@ -108,11 +108,11 @@ st.markdown(f"""
 .kpi {{ padding: 18px 24px; border-left: 1px solid #E3E8EE; display: flex; flex-direction: column; gap: 6px; }}
 .kpi:first-child {{ border-left: 0; }}
 .kpi .l {{ font-size: 14px; color: {MUTED}; display: flex; align-items: center; gap: 8px; }}
-.kpi .v {{ font-size: 36px; font-weight: 700; line-height: 1.05; color: {INK}; }}
+.kpi .v {{ font-size: clamp(24px, 2.5vw, 36px); font-weight: 700; line-height: 1.05; color: {INK}; white-space: nowrap; }}
 .kpi .sub {{ font-size: 14px; color: {MUTED}; }}
 .kpi .sub b {{ color: {INK}; font-weight: 650; }}
 .sw {{ width: 10px; height: 10px; border-radius: 2px; display: inline-block; }}
-.hero {{ background: {INK}; color: #F3F5F8; border-radius: 6px; padding: 26px 30px; display: flex;
+.hero {{ background: {CRM_GREEN_DARK}; color: #F3F5F8; border-radius: 6px; padding: 26px 30px; display: flex;
         flex-direction: column; gap: 6px; margin-bottom: 12px; }}
 .hero .l {{ color: #AEB8C6; font-size: 15px; }}
 .hero .v {{ font-size: 64px; font-weight: 760; font-stretch: 110%; line-height: 1; }}
@@ -726,7 +726,7 @@ with tab_calls:
                                                          color=INK).encode(
                     y=y, x="total:Q", text=alt.Text("total:Q", format=","))
                 st.altair_chart((bar + bar_labels).properties(height=ROW1_H - 190), width="stretch")
-                st.caption("Bar = Total calls in the table (blue Inbound + orange Outbound). Hover for each part.")
+                st.caption("Bar = Total calls in the table (dark green Inbound + light green Outbound). Hover for each part.")
         with right:
             with st.container(border=True, height=ROW1_H):
                 st.markdown("#### Calls by person (table)")
@@ -802,7 +802,7 @@ with tab_calls:
                     color=alt.Color("type:N", title=None, legend=alt.Legend(orient="top", labelLimit=320),
                                     scale=alt.Scale(domain=["Customer called in, not answered",
                                                             "We called out, customer didn't answer"],
-                                                    range=["#4F86D9", "#F4B47A"])),   # soft blue = inbound missed, soft orange = outbound no answer
+                                                    range=["#5E9C76", "#C9DD8F"])),   # soft blue = inbound missed, soft orange = outbound no answer
                     tooltip=[alt.Tooltip("hour:O", title="Hour"), alt.Tooltip("type:N", title="Type"),
                              alt.Tooltip("missed:Q", title="Missed calls")])
                 labels = alt.Chart(totals).mark_text(dy=-8, fontSize=12, fontWeight="bold", color=INK).encode(
@@ -883,7 +883,7 @@ with tab_setters:
                 f'<span class="v">{fmt_pct(tot["Apt / Leads"])}</span>'
                 f'<span class="s">{int(tot.Appointments):,} appointments ÷ {int(tot.Leads):,} leads</span></div>'
                 f'<div class="dash hero"><span class="l">Order / Apt</span>'
-                f'<span class="v" style="color:#F2A65E">{fmt_pct(tot["Order / Apt"])}</span>'
+                f'<span class="v" style="color:#B7E08A">{fmt_pct(tot["Order / Apt"])}</span>'
                 f'<span class="s">{int(tot.Orders):,} orders ÷ {int(tot.Appointments):,} appointments</span></div>',
                 unsafe_allow_html=True)
 
@@ -1048,8 +1048,9 @@ with tab_sales:
             ("Appointments", f"{int(company.Appointments):,}", BLUE),
             ("Cancelled", f"{int(company.Cancelled):,}", "#AEB8C6"),
             ("Orders", f"{int(company.Orders):,}", ORANGE),
-            ("Installs", f"{int(company.Installs):,}", "#2CB5A6"),
-            ("Installed $", f"${company['Installed $']:,.0f}", "#2CB5A6"),
+            ("Installs", f"{int(company.Installs):,}", "#2E8B57"),
+            ("Installed $", (f"${company['Installed $'] / 1e6:,.2f}M" if company['Installed $'] >= 1e6
+                             else f"${company['Installed $']:,.0f}"), "#2E8B57"),
         ])
 
         st.markdown(f"""
@@ -1075,7 +1076,7 @@ with tab_sales:
                        f"{ALL_COLS['lead_by']} is empty; they count in the cards unless excluded, never in a rep's row.")
             st.caption(f"Sorted by leads, then appointments, then orders. “vs setters” = the rep’s % minus the appointment setters’ %. "
                        f"Example: a rep with Apt / Leads 0.0% vs setters {fmt_pct(setters['Apt / Leads'])} shows "
-                       f"▼ −{fmt_pct(setters['Apt / Leads'])}. ▲ blue = better than setters, ▼ orange = worse.")
+                       f"▼ −{fmt_pct(setters['Apt / Leads'])}. ▲ green = better than setters, ▼ red = worse.")
             # Rows sorted by orders, then two summary rows like the design
             show = t.copy()
 
@@ -1105,8 +1106,8 @@ with tab_sales:
             def diff_style(v):
                 if pd.isna(v):
                     return ""
-                return ("color: #16457F; background-color: #E3EDFB; font-weight: 600" if v >= 0
-                        else "color: #8A3B06; background-color: #FCEBDD; font-weight: 600")
+                return ("color: #0A5E2E; background-color: #E2F2D6; font-weight: 600" if v >= 0
+                        else "color: #A10F25; background-color: #FBE3E6; font-weight: 600")
 
             def summary_rows(row):
                 if row.name in ("All sales reps", scope):
