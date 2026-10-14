@@ -115,6 +115,10 @@ st.markdown(f"""
 .kpi .v {{ font-size: clamp(24px, 2.5vw, 36px); font-weight: 700; line-height: 1.05; color: {INK}; white-space: nowrap; }}
 .kpi .sub {{ font-size: 14px; color: {MUTED}; }}
 .kpi .sub b {{ color: {INK}; font-weight: 650; }}
+.brk {{ display: grid; grid-template-columns: repeat(4, auto); justify-content: start; column-gap: 26px;
+        row-gap: 2px; margin: 6px 0 4px; }}
+.brk span {{ font-size: 13px; color: {MUTED}; }}
+.brk b {{ font-size: 20px; font-weight: 700; color: {INK}; }}
 .sw {{ width: 10px; height: 10px; border-radius: 2px; display: inline-block; }}
 .hero {{ background: {CRM_GREEN_DARK}; color: #F3F5F8; border-radius: 6px; padding: 26px 30px; display: flex;
         flex-direction: column; gap: 6px; margin-bottom: 12px; }}
@@ -560,14 +564,14 @@ def checklist_filter(label, options, key, cols=3):
     return [o for o, k in keys.items() if st.session_state[k]]
 
 
-def kpi_strip(items):
+def kpi_strip(items, cols=None):
     """items: list of (label, value, swatch_color_or_None[, list of sub-lines])"""
     def cell(l, v, c, subs=()):
         sw = f"<span class=sw style=background:{c}></span>" if c else ""
         lines = "".join(f'<span class="sub">{x}</span>' for x in subs)
         return f'<div class="kpi"><span class="l">{sw}{l}</span><span class="v">{v}</span>{lines}</div>'
     cells = "".join(cell(*it) for it in items)
-    st.markdown(f'<div class="dash kpis" style="grid-template-columns:repeat({len(items)},minmax(0,1fr))">'
+    st.markdown(f'<div class="dash kpis" style="grid-template-columns:{cols or f"repeat({len(items)},minmax(0,1fr))"}">'
                 f'{cells}</div>', unsafe_allow_html=True)
 
 
@@ -685,40 +689,38 @@ with tab_calls:
         inb, outb = c[c.direction == "Inbound"], c[c.direction == "Outbound"]
         in_missed, out_missed = int(inb.missed.sum()), int(outb.missed.sum())
         in_ok, out_ok = inb[~inb.missed], outb[~outb.missed]          # connected calls only (for talk time)
-        def by_result(results):
-            sub = c[c.result.isin(results)]
-            n_in, n_out = int((sub.direction == "Inbound").sum()), int((sub.direction == "Outbound").sum())
-            return f"{len(sub):,}", [f"<b>{n_in:,}</b> inbound · <b>{n_out:,}</b> outbound"]
+        # Inbound and Outbound cards, each split into: answered, missed, voicemail, hung up (hold)
         hung = [r for r in MISSED_RESULTS if r.lower().startswith("hung up")]
-        m_n, m_sub = by_result(["Missed Call"])
-        v_n, v_sub = by_result(["Sent to voicemail"])
-        h_n, h_sub = by_result(hung)
-        h_detail = ", ".join(f"{r.replace('Hung up ', '').strip('()')} {int((c.result == r).sum()):,}" for r in hung)
+
+        def breakdown(d, ok_label):
+            n = lambda m: f"{int(m.sum()):,}"
+            labels = [ok_label, "Missed", "Voicemail", "Hung up (hold)"]
+            values = [n(~d.missed), n(d.result == "Missed Call"), n(d.result == "Sent to voicemail"), n(d.result.isin(hung))]
+            return ('<div class="brk">' + "".join(f"<span>{l}</span>" for l in labels)
+                    + "".join(f"<b>{v}</b>" for v in values) + "</div>")
+
+        def talk(ok):
+            return (f"talk time <b>{hms(ok.duration_sec.sum())}</b> · "
+                    f"avg call <b>{mmss(ok.duration_sec.mean() if len(ok) else 0)}</b>")
+
         kpi_strip([
-            ("Inbound", f"{len(inb) - in_missed:,}", BLUE,
-             [f"talk time <b>{hms(in_ok.duration_sec.sum())}</b>",
-              f"avg call <b>{mmss(in_ok.duration_sec.mean() if len(in_ok) else 0)}</b>"]),
-            ("Outbound", f"{len(outb) - out_missed:,}", ORANGE,
-             [f"talk time <b>{hms(out_ok.duration_sec.sum())}</b>",
-              f"avg call <b>{mmss(out_ok.duration_sec.mean() if len(out_ok) else 0)}</b>"]),
-            ("Missed", m_n, "#C9DD8F", m_sub),
-            ("Voicemail", v_n, "#C9DD8F", v_sub),
-            ("Hung up (hold)", h_n, "#C9DD8F", [h_detail]),
+            ("Inbound calls", f"{len(inb):,}", BLUE, [breakdown(inb, "Answered"), talk(in_ok)]),
+            ("Outbound calls", f"{len(outb):,}", ORANGE, [breakdown(outb, "Connected"), talk(out_ok)]),
             ("Avg calls / day", f"{len(talked) / n_days:,.0f}" if n_days else "0", None,
-             [f"inbound + outbound ÷ {n_days} days"]),
-        ])
-        st.caption("Everywhere on this page, Inbound and Outbound count only calls that connected; missed calls are "
-                   "shown separately and are left out of totals, averages and talk time. "
-                   "Inbound missed = no one answered, sent to voicemail, or the caller hung up on hold / in the queue. "
-                   "Outbound no answer = we called and the customer didn't pick up.")
+             [f"answered + connected ÷ {n_days} days"]),
+        ], cols="minmax(0,2fr) minmax(0,2fr) minmax(0,1fr)")
+        st.caption("Inbound calls and Outbound calls count every call in that direction. Each is split into: "
+                   "Answered / Connected, Missed (Call Result = Missed Call), Voicemail (Sent to voicemail) and "
+                   "Hung up (hold) (hung up on hold, in the queue or parked). "
+                   "Talk time, avg call and Avg calls / day use only answered / connected calls.")
 
         g = c.groupby("person")
         by = lambda df: df.groupby("person").size()
         tbl = pd.DataFrame({
-            "Inbound": by(inb[~inb.missed]), "Inbound missed": by(inb[inb.missed]),
-            "Outbound": by(outb[~outb.missed]), "Outbound no answer": by(outb[outb.missed]),
+            "Inbound (all)": by(inb), "Inbound answered": by(inb[~inb.missed]), "Inbound missed": by(inb[inb.missed]),
+            "Outbound (all)": by(outb), "Outbound connected": by(outb[~outb.missed]), "Outbound no answer": by(outb[outb.missed]),
         }).reindex(g.size().index).fillna(0).astype(int)
-        tbl["Total calls"] = tbl.Inbound + tbl.Outbound      # connected calls only (no missed)
+        tbl["Total calls"] = tbl["Inbound (all)"] + tbl["Outbound (all)"]      # every inbound + outbound call
         tbl["Avg calls / day"] = (len_t := talked.groupby("person").size().reindex(tbl.index).fillna(0)) / g.date.nunique()
         tbl["Talk time"] = talked.groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
         tbl["Inbound time"] = talked[talked.kind == "Inbound"].groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
@@ -733,7 +735,7 @@ with tab_calls:
             with st.container(border=True, height=ROW1_H):
                 st.markdown("#### Calls by person (chart)")
                 # One bar per person: Inbound + Outbound (connected calls), same numbers as the table
-                pb = talked.groupby(["person", "direction"]).size().rename("calls").reset_index()
+                pb = c.groupby(["person", "direction"]).size().rename("calls").reset_index()   # all calls, like Total calls
                 pb["order"] = (pb.direction == "Outbound").astype(int)
                 tot_pb = pb.groupby("person").calls.sum().rename("total").reset_index()
                 y = alt.Y("person:N", sort=list(tbl.index), title=None, axis=alt.Axis(labelLimit=160))
@@ -748,18 +750,21 @@ with tab_calls:
                                                          color=INK).encode(
                     y=y, x="total:Q", text=alt.Text("total:Q", format=","))
                 st.altair_chart((bar + bar_labels).properties(height=ROW1_H - 190), width="stretch")
-                st.caption("Bar = Total calls in the table (dark green Inbound + light green Outbound). Hover for each part.")
+                st.caption("Bar = Total calls in the table: dark green = Inbound (all), light green = Outbound (all). "
+                           "Hover for each part.")
         with right:
             with st.container(border=True, height=ROW1_H):
                 st.markdown("#### Calls by person (table)")
-                st.caption("Inbound = answered inbound calls, Outbound = connected outbound calls. Missed calls are only in "
-                           "the two missed columns and are not in Total calls, Avg calls / day, talk time or Avg call.")
+                st.caption("Inbound (all) = answered + missed. Outbound (all) = connected + no answer. "
+                           "Total calls = Inbound (all) + Outbound (all). Talk time, Avg call and Avg calls / day "
+                           "use answered / connected calls only.")
                 show = tbl.copy()
                 tot = show.drop(columns=["Avg call", "Avg calls / day"]).sum()
                 tot["Avg calls / day"] = len(talked) / n_days if n_days else np.nan
                 tot["Avg call"] = tot["Talk time"] / len(talked) if len(talked) else np.nan
                 show.loc["Total"] = tot[show.columns]
-                for col in ("Inbound", "Inbound missed", "Outbound", "Outbound no answer", "Total calls"):
+                for col in ("Inbound (all)", "Inbound answered", "Inbound missed", "Outbound (all)",
+                            "Outbound connected", "Outbound no answer", "Total calls"):
                     show[col] = show[col].astype(int)
                 for col in ("Talk time", "Inbound time", "Outbound time"):
                     show[col] = show[col].map(hms)
