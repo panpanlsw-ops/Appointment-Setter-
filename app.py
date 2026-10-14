@@ -684,6 +684,7 @@ with tab_calls:
 
         inb, outb = c[c.direction == "Inbound"], c[c.direction == "Outbound"]
         in_missed, out_missed = int(inb.missed.sum()), int(outb.missed.sum())
+        in_ok, out_ok = inb[~inb.missed], outb[~outb.missed]          # connected calls only (for talk time)
         def by_result(results):
             sub = c[c.result.isin(results)]
             n_in, n_out = int((sub.direction == "Inbound").sum()), int((sub.direction == "Outbound").sum())
@@ -694,8 +695,12 @@ with tab_calls:
         h_n, h_sub = by_result(hung)
         h_detail = ", ".join(f"{r.replace('Hung up ', '').strip('()')} {int((c.result == r).sum()):,}" for r in hung)
         kpi_strip([
-            ("Inbound", f"{len(inb) - in_missed:,}", BLUE, ["answered calls"]),
-            ("Outbound", f"{len(outb) - out_missed:,}", ORANGE, ["connected calls"]),
+            ("Inbound", f"{len(inb) - in_missed:,}", BLUE,
+             [f"talk time <b>{hms(in_ok.duration_sec.sum())}</b>",
+              f"avg call <b>{mmss(in_ok.duration_sec.mean() if len(in_ok) else 0)}</b>"]),
+            ("Outbound", f"{len(outb) - out_missed:,}", ORANGE,
+             [f"talk time <b>{hms(out_ok.duration_sec.sum())}</b>",
+              f"avg call <b>{mmss(out_ok.duration_sec.mean() if len(out_ok) else 0)}</b>"]),
             ("Missed", m_n, "#C9DD8F", m_sub),
             ("Voicemail", v_n, "#C9DD8F", v_sub),
             ("Hung up (hold)", h_n, "#C9DD8F", [h_detail]),
