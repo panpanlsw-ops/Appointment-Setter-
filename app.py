@@ -82,8 +82,9 @@ OFFICE_COL = "Regional Office"
 # Installs (optional columns in the all company tab)
 INSTALL_COLS = {"amount": "IS amount", "rep": "IS reps"}   # installed system: sales amount + who sold it
 CHART_MIN_LEADS = 5   # charts only show sales reps with at least this many leads
-# Branches that start unchecked on the Sales vs setters tab (you can still tick them back on)
-DEFAULT_EXCLUDED_BRANCHES = ["CSR Staff", "National Sales Team", "Service Staff", "Commercial"]
+# Branches left out of the Sales vs setters tab completely (not in the list, not in any number).
+# Leads with no creator (e.g. Web) and the appointment setters team are always left out too.
+EXCLUDED_BRANCHES = ["CSR Staff", "National Sales Team", "Service Staff", "Commercial"]
 # Link to a lead in the CRM. {lead} is replaced with the leads_id. Leave "" to hide the link column.
 CRM_LEAD_URL = ""   # e.g. "https://your-crm.example.com/leads/view.php?id={lead}"
 
@@ -985,16 +986,15 @@ with tab_sales:
         is_setter_branch = lambda b: b.str.lower() == SETTER_BRANCH.lower()
         NO_CREATOR = "Leads with no creator (Web, etc.)"
         sales_branches = sorted((set(c_rows.branch) | set(c_rows.owner_office)) - {"", SETTER_BRANCH})   # incl. Regional Offices
-        branch_options = sales_branches + [SETTER_BRANCH, NO_CREATOR]
+        excluded = {b.lower() for b in EXCLUDED_BRANCHES + [SETTER_BRANCH]}
+        branch_options = [b for b in sales_branches if b.lower() not in excluded]   # excluded ones never appear
         f1, f2 = st.columns([3, 2])
         with f1:
             s, e = date_picker(f"sales_range_{lo}_{hi}", lo, hi, lo, hi)
         with f2:
-            pick = checklist_filter("Branches", branch_options, key="br",
-                                    default_off=[b for b in DEFAULT_EXCLUDED_BRANCHES + [SETTER_BRANCH, NO_CREATOR]
-                                                 if b in branch_options])
+            pick = checklist_filter("Branches", branch_options, key="brx")
         all_picked = set(pick) == set(branch_options)
-        scope = "All company" if all_picked else "Selected branches"
+        scope = "All listed branches" if all_picked else "Selected branches"
 
         R = c_rows
         start, end = pd.Timestamp(s), pd.Timestamp(e) + pd.Timedelta(days=1)
@@ -1036,7 +1036,7 @@ with tab_sales:
 
         # The whole company: every lead (row) in the all company tab
         # Cards follow the branch filter (everything selected = the whole company)
-        in_scope = R.branch.isin(pick) | ((R.branch == "") & (NO_CREATOR in pick))
+        in_scope = R.branch.isin(pick)            # leads with no creator / excluded branches never count
         company = metrics(R[in_scope])
 
         # Totals for a group: leads by `lead_m`, appointments + cancelled by `apt_m`, orders by `order_m`
@@ -1073,7 +1073,10 @@ with tab_sales:
         # The Branches filter picks leads by this, so a rep with leads in two offices shows up
         # under both, counting only the leads in the offices you picked.
         R = R.assign(lead_office=R.owner_office.where(R.owner_office != "", R.owner.map(rep_branch).fillna("")))
-        in_pick = R.lead_office.isin(pick) | ((R.lead_office == "") & all_picked)
+        in_pick = R.lead_office.isin(pick)       # excluded offices never count
+        # Cards + "All listed branches" row: every lead whose Regional Office is in the Branches list
+        in_scope = in_pick
+        company = metrics(R[in_scope])
         # sales reps = leads owners, except people in the appointment setters department
         names = {n for n in set(R.owner) - {""} if rep_branch.get(n, "").lower() != SETTER_BRANCH.lower()}
         # A rep is a NAME + REGIONAL OFFICE: two people with the same name in different offices are
