@@ -1178,50 +1178,46 @@ with tab_sales:
                                "Installed $": "${:,.0f}",
                                **{c: fmt_pct for c in ["Apt / Leads", "Order / Leads"]}})
                       .apply(summary_rows, axis=1))
-            st.caption("Click a sales rep's row to see their appointments (with lead IDs) right below the table.")
-            picked_row = st.dataframe(styled, height=min(38 * (len(show) + 1) + 4, 680), key="rep_table",
-                                      on_select="rerun", selection_mode="single-row")
-            rows_sel = picked_row.selection.rows if picked_row and hasattr(picked_row, "selection") else []
-            clicked = show.index[rows_sel[0]] if rows_sel else None
-            if clicked in t.index and st.session_state.get("_last_clicked_rep") != clicked:
-                st.session_state["sales_apt_rep"] = clicked              # jump the detail list to that rep
-                st.session_state["sales_apt_kind"] = "Set up by appointment setters"
-            st.session_state["_last_clicked_rep"] = clicked
+            st.caption("Click a number in Apts from setters (or in any count column) to list those leads, "
+                       "with a link to each lead in the CRM, right below the table.")
+            picked = st.dataframe(styled, height=min(38 * (len(show) + 1) + 4, 680), key="rep_table",
+                                  on_select="rerun", selection_mode="single-cell")
             st.download_button("Download CSV", t.to_csv().encode("utf-8-sig"),
                                file_name=f"sales_vs_setters_{s:%Y%m%d}_{e:%Y%m%d}.csv", mime="text/csv")
 
-        with st.container(border=True):
-            st.markdown("#### Appointments by sales rep (detail)")
-            st.caption("The leads behind the numbers in the table, one row per lead. Click a row in the table above "
-                       "to jump here, or pick a rep below.")
-            d1, d2 = st.columns([2, 3])
-            rep_options = ["All sales reps"] + list(t.index)
-            if st.session_state.get("sales_apt_rep") not in rep_options:
-                st.session_state["sales_apt_rep"] = "All sales reps"
-            who = d1.selectbox("Sales rep", rep_options, key="sales_apt_rep")
-            kind = d2.radio("Show", ["Set up by appointment setters", "All appointments"], horizontal=True,
-                            key="sales_apt_kind")
-            flag = R.is_setter_apt if kind == "Set up by appointment setters" else R.is_any_apt
-            apt_list = R[flag & own & R.rep.isin(reps if who == "All sales reps" else [who])]
-            apt_list = (apt_list.sort_values("apt_date")
-                        .drop_duplicates("lead", keep="last")
-                        .assign(**{"Set up on": lambda x: x.apt_date.dt.strftime("%m/%d/%Y %H:%M"),
-                                   "Status": lambda x: np.where(x.cancelled, "Cancelled", "Set up"),
-                                   "Ordered": lambda x: np.where(x.ordered, "Yes", "")})
-                        .rename(columns={"lead": "Lead ID", "apt_by": "Set by", "apt_branch": "Set by team",
-                                         "rep": "Sales rep (lead owner)"})
-                        [["Lead ID", "Sales rep (lead owner)", "Set by", "Set by team", "Set up on", "Status", "Ordered"]]
-                        .sort_values("Set up on"))
-            cfg = {}
-            if CRM_LEAD_URL:
-                apt_list.insert(1, "Open in CRM", apt_list["Lead ID"].map(lambda i: CRM_LEAD_URL.format(lead=i)))
-                cfg["Open in CRM"] = st.column_config.LinkColumn("Open in CRM", display_text="Open lead")
-            n_set = int((apt_list.Status == "Set up").sum())
-            st.markdown(f"**{len(apt_list):,} appointments**: {n_set:,} set up, {len(apt_list) - n_set:,} cancelled")
-            st.dataframe(apt_list, hide_index=True, height=380, column_config=cfg)
-            st.download_button("Download this list", apt_list.to_csv(index=False).encode("utf-8-sig"),
-                               file_name=f"appointments_{who.replace(' ', '_')}_{s:%Y%m%d}_{e:%Y%m%d}.csv",
-                               mime="text/csv", key="sales_apt_dl")
+            # ---- the leads behind the clicked number
+            CLICK_FLAGS = {"Apts from setters": "is_setter_apt", "All appointments": "is_any_apt",
+                           "Set up (active)": "is_apt", "Cancelled": "is_cancel", "Leads": "is_lead",
+                           "Orders": "is_order", "Installs": "is_install"}
+            cells = picked.selection.cells if picked is not None and hasattr(picked, "selection") else []
+            if cells:
+                row_pos, col = cells[0]
+                who = show.index[row_pos]
+                if col not in CLICK_FLAGS:
+                    st.info(f"Click a number in one of these columns to see the leads: {', '.join(CLICK_FLAGS)}.")
+                elif who not in t.index and who != "All sales reps":
+                    st.info("Click a number in a sales rep's row (or the All sales reps row) to see the leads.")
+                else:
+                    who_mask = own if who == "All sales reps" else (own & (R.rep == who))
+                    hit = R[R[CLICK_FLAGS[col]] & who_mask].sort_values("apt_date").drop_duplicates("lead", keep="last")
+                    leads_tbl = pd.DataFrame({
+                        "Lead": (hit.lead.map(lambda i: CRM_LEAD_URL.format(lead=i)) if CRM_LEAD_URL else hit.lead),
+                        "Sales rep (lead owner)": hit.rep,
+                        "Appointment set by": hit.apt_by,
+                        "Set by team": hit.apt_branch,
+                        "Set up on": hit.apt_date.dt.strftime("%m/%d/%Y %H:%M").fillna(""),
+                        "Status": np.where(hit.cancelled, "Cancelled", np.where(hit.active, "Set up", "")),
+                        "Ordered": np.where(hit.ordered, "Yes", ""),
+                    })
+                    st.markdown(f"##### {who} · {col}: {len(leads_tbl):,} leads")
+                    cfg = ({"Lead": st.column_config.LinkColumn("Lead (click to open in CRM)",
+                                                                display_text=r"leads_id=(\d+)")}
+                           if CRM_LEAD_URL else {})
+                    st.dataframe(leads_tbl, hide_index=True, column_config=cfg,
+                                 height=min(38 * (len(leads_tbl) + 1) + 4, 420))
+                    st.download_button("Download these leads", leads_tbl.to_csv(index=False).encode("utf-8-sig"),
+                                       file_name=f"{who.replace(' ', '_')}_{col.replace(' ', '_')}.csv",
+                                       mime="text/csv", key="clicked_leads_dl")
 
         def vs_chart(metric):
             d = t[t.Leads >= CHART_MIN_LEADS].reset_index()[["Sales rep", metric]].dropna()
