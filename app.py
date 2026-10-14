@@ -1206,6 +1206,7 @@ with tab_sales:
                        f"Set by sales = appointments not set by the appointment setters (the rep or other sales staff), "
                        f"plus orders on leads without an appointment. Set by setters = appointments the appointment "
                        f"setters department set up. Orders, installs and Installed $ follow the appointment's row. "
+                       f"Share of appts = this row's appointments ÷ the rep's total appointments (both rows). "
                        f"Apt / Leads = set up ÷ the rep's leads; Order / Apt = orders ÷ set up. Sorted by leads.")
             setter_row = is_setter_branch(R.apt_branch)
             SETBY = {"Set by sales": ~setter_row, "Set by setters": setter_row}
@@ -1235,6 +1236,11 @@ with tab_sales:
                                                  if c_["Set up (active)"] else np.nan)})
                     meta.append((who, label))
             two = pd.DataFrame(rows)
+            # Share of the rep's appointments: this row ÷ (set by sales + set by setters)
+            pair_total = two.groupby(two.index // 2)["All appointments"].transform("sum")
+            two.insert(two.columns.get_loc("All appointments") + 1, "Share of appts",
+                       np.where(pair_total > 0, two["All appointments"] / pair_total * 100, np.nan))
+            two["_pair_total"] = pair_total
 
             def row_style(row):
                 who, label = meta[row.name]
@@ -1253,14 +1259,18 @@ with tab_sales:
             disp["Installed $"] = disp["Installed $"].map(lambda v: "" if pd.isna(v) else f"${v:,.0f}")
             for c_ in ["Apt / Leads", "Order / Apt"]:
                 disp[c_] = disp[c_].map(lambda v: "" if pd.isna(v) else f"{v:.1f}%")
-            right = ["Leads", "All appointments", "Set up (active)", "Cancelled", "Orders", "Installs",
-                     "Installed $", "Apt / Leads", "Order / Apt"]
+            disp["Share of appts"] = [
+                "" if pd.isna(p_) else f"{p_:.1f}%  ({int(n_):,} of {int(tot_):,})"
+                for p_, n_, tot_ in zip(two["Share of appts"], two["All appointments"], two["_pair_total"])]
+            disp = disp.drop(columns="_pair_total")
+            right = ["Leads", "All appointments", "Share of appts", "Set up (active)", "Cancelled", "Orders",
+                     "Installs", "Installed $", "Apt / Leads", "Order / Apt"]
             styled = disp.style.apply(row_style, axis=1)
             st.caption("Click a number to list those leads, with a link to each lead in the CRM, right below the table.")
             picked = st.dataframe(styled, hide_index=True, key="rep_table", on_select="rerun",
                                   selection_mode="single-cell", height=min(36 * (len(two) + 1) + 4, 720),
                                   column_config={c_: st.column_config.TextColumn(c_, alignment="right") for c_ in right})
-            st.download_button("Download CSV", two.to_csv(index=False).encode("utf-8-sig"),
+            st.download_button("Download CSV", disp.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"sales_vs_setters_{s:%Y%m%d}_{e:%Y%m%d}.csv", mime="text/csv")
 
             # ---- the leads behind the clicked number
