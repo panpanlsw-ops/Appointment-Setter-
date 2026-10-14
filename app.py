@@ -969,8 +969,9 @@ with tab_setters:
             sources = {"Appointments": active, "Cancelled": As[As.status == "Cancelled"],
                        "Orders": As[As.ordered], "Leads": Ls}
             cells = picked_s.selection.cells if picked_s is not None and hasattr(picked_s, "selection") else []
-            if cells:
-                row_pos, col = cells[0]
+            # Nothing clicked -> show every appointment for all setters (the Total row)
+            row_pos, col = cells[0] if cells else (len(t) - 1, "Appointments")
+            if True:
                 who = t.index[row_pos]
                 if col not in sources:
                     st.info(f"Click a number in one of these columns to see the leads: {', '.join(sources)}.")
@@ -1004,7 +1005,8 @@ with tab_setters:
                                            "Link": "", "Order amount": rpt["Order amount"].sum(min_count=1)}])
                     rpt = pd.concat([rpt, total], ignore_index=True)
                     rpt["Order amount"] = rpt["Order amount"].map(lambda v: "" if pd.isna(v) else f"${v:,.0f}")
-                    st.markdown(f"##### {who} · {col}: {len(hit):,} leads")
+                    st.markdown(f"##### {'All setters' if who == 'Total' else who} · {col}: {len(hit):,} leads"
+                                + ("" if cells else "  \n<span style='font-size:13px;color:#5A6474;font-weight:400'>Showing everything. Click a number in the table to narrow it down.</span>"), unsafe_allow_html=True)
                     cfg = {count_col: st.column_config.NumberColumn(format="%d")}
                     if CRM_LEAD_URL:
                         cfg["Link"] = st.column_config.LinkColumn("Links")
