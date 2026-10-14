@@ -469,10 +469,7 @@ def fmt_pct(v):
 
 
 def period_picker(key, lo, hi):
-    """Pick a whole month or a week of a month instead of exact dates.
-    Weeks follow the days of the month: Week 1 = 1st–7th, Week 2 = 8th–14th, Week 3 = 15th–21st,
-    Week 4 = 22nd–28th, Week 5 = 29th–end of month. Returns (start, end)."""
-    months = pd.period_range(lo, hi, freq="M")[::-1]                   # newest first
+    """Pick a whole month or a Monday–Sunday week instead of exact dates. Returns (start, end)."""
     c1, c2 = st.columns([1, 2])
     view = c1.radio("Show by", ["Month", "Week", "All dates"], horizontal=True, key=f"{key}_view")
     if view == "All dates":
@@ -480,18 +477,18 @@ def period_picker(key, lo, hi):
                     unsafe_allow_html=True)
         return lo, hi
     if view == "Month":
-        labels = {f"{m.strftime('%B %Y')}": (m.start_time.date(), m.end_time.date()) for m in months}
+        months = pd.period_range(lo, hi, freq="M")[::-1]                      # newest first
+        labels = {m.strftime("%B %Y"): (m.start_time.date(), m.end_time.date()) for m in months}
+        label = "Month"
     else:
         labels = {}
-        for m in months:
-            last_day = m.end_time.day
-            for w in range(5, 0, -1):                                  # newest week first
-                a = m.start_time.date().replace(day=7 * (w - 1) + 1)
-                b = m.start_time.date().replace(day=min(7 * w if w < 5 else last_day, last_day))
-                if a > b or b < lo or a > hi:
-                    continue
-                labels[f"{m.strftime('%B %Y')} · Week {w} ({a:%b} {a.day}–{b.day})"] = (a, b)
-    choice = c2.selectbox("Month" if view == "Month" else "Week", list(labels), key=f"{key}_{view}")
+        monday = hi - dt.timedelta(days=hi.weekday())                         # newest week first
+        while monday + dt.timedelta(days=6) >= lo:
+            sunday = monday + dt.timedelta(days=6)
+            labels[f"{monday:%b} {monday.day} – {sunday:%b} {sunday.day}, {sunday.year}"] = (monday, sunday)
+            monday -= dt.timedelta(days=7)
+        label = "Week (Monday – Sunday)"
+    choice = c2.selectbox(label, list(labels), key=f"{key}_{view}")
     a, b = labels[choice]
     return max(a, lo), min(b, hi)
 
@@ -811,24 +808,34 @@ with tab_calls:
             if missed.empty:
                 st.caption("No missed calls in this range.")
             else:
-                mh = missed.groupby(["hour", "direction"]).size().rename("missed").reset_index()
-                mh["type"] = mh.direction.map({"Inbound": "Customer called in, not answered",
-                                               "Outbound": "We called out, customer didn't answer"})
+                # Same three groups as the cards: Missed / Voicemail / Hung up (hold)
+                missed = missed.assign(type=np.select(
+                    [missed.result == "Missed Call", missed.result == "Sent to voicemail"],
+                    ["Missed", "Voicemail"], "Hung up (hold)"))
+                mh = (missed.groupby(["hour", "type"])
+                      .agg(missed=("direction", "size"),
+                           inbound=("direction", lambda d: int((d == "Inbound").sum())),
+                           outbound=("direction", lambda d: int((d == "Outbound").sum())))
+                      .reset_index())
+                mh["order"] = mh.type.map({"Missed": 0, "Voicemail": 1, "Hung up (hold)": 2})
                 totals = missed.groupby("hour").size().rename("total").reset_index()
                 worst = totals.sort_values("total", ascending=False).head(3)
                 bars = alt.Chart(mh).mark_bar(cornerRadiusTopLeft=2, cornerRadiusTopRight=2).encode(
                     x=alt.X("hour:O", title="Hour of day (8 = 8:00–8:59)", axis=alt.Axis(labelAngle=0)),
                     y=alt.Y("missed:Q", title="Missed calls"),
-                    color=alt.Color("type:N", title=None, legend=alt.Legend(orient="top", labelLimit=320),
-                                    scale=alt.Scale(domain=["Customer called in, not answered",
-                                                            "We called out, customer didn't answer"],
-                                                    range=["#5E9C76", "#C9DD8F"])),   # soft blue = inbound missed, soft orange = outbound no answer
+                    color=alt.Color("type:N", title=None, legend=alt.Legend(orient="top"),
+                                    sort=["Missed", "Voicemail", "Hung up (hold)"],
+                                    scale=alt.Scale(domain=["Missed", "Voicemail", "Hung up (hold)"],
+                                                    range=["#C9DD8F", "#5E9C76", "#0A5E2E"])),
+                    order=alt.Order("order:Q"),
                     tooltip=[alt.Tooltip("hour:O", title="Hour"), alt.Tooltip("type:N", title="Type"),
-                             alt.Tooltip("missed:Q", title="Missed calls")])
+                             alt.Tooltip("missed:Q", title="Calls"), alt.Tooltip("inbound:Q", title="Inbound"),
+                             alt.Tooltip("outbound:Q", title="Outbound")])
                 labels = alt.Chart(totals).mark_text(dy=-8, fontSize=12, fontWeight="bold", color=INK).encode(
                     x="hour:O", y="total:Q", text="total:Q")
                 st.altair_chart((bars + labels).properties(height=280), width="stretch")
-                st.caption("Each bar = how many calls were missed during that hour. "
+                st.caption("Each bar = calls that didn't connect during that hour, split the same way as the cards: "
+                           "Missed (no one picked up), Voicemail, Hung up (hold). Hover for inbound / outbound. "
                            "Most missed calls: " + ", ".join(f"{int(h)}:00 ({n})" for h, n in zip(worst.hour, worst.total)) + ".")
 
 
