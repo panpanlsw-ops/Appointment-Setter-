@@ -82,6 +82,10 @@ OFFICE_COL = "Regional Office"
 # Installs (optional columns in the all company tab)
 INSTALL_COLS = {"amount": "IS amount", "rep": "IS reps"}   # installed system: sales amount + who sold it
 CHART_MIN_LEADS = 5   # charts only show sales reps with at least this many leads
+# Branches that start unchecked on the Sales vs setters tab (you can still tick them back on)
+DEFAULT_EXCLUDED_BRANCHES = ["CSR Staff", "National Sales Team", "Service Staff", "Commercial"]
+# Link to a lead in the CRM. {lead} is replaced with the leads_id. Leave "" to hide the link column.
+CRM_LEAD_URL = ""   # e.g. "https://your-crm.example.com/leads/view.php?id={lead}"
 
 # Used only to build demo data
 SETTER_DEPT = "Appointment Setter"
@@ -473,28 +477,32 @@ def fmt_pct(v):
 
 
 def period_picker(key, lo, hi):
-    """Pick a whole month or a Monday–Sunday week instead of exact dates. Returns (start, end)."""
+    """Pick one or more months, or one or more Monday–Sunday weeks. Returns a list of (start, end)."""
     c1, c2 = st.columns([1, 2])
     view = c1.radio("Show by", ["Month", "Week", "All dates"], horizontal=True, key=f"{key}_view")
     if view == "All dates":
         c2.markdown(f'<div style="padding-top:30px;color:{MUTED}">{lo:%b %d, %Y} – {hi:%b %d, %Y}</div>',
                     unsafe_allow_html=True)
-        return lo, hi
+        return [(lo, hi)]
     if view == "Month":
         months = pd.period_range(lo, hi, freq="M")[::-1]                      # newest first
-        labels = {m.strftime("%B %Y"): (m.start_time.date(), m.end_time.date()) for m in months}
-        label = "Month"
+        options = {m.strftime("%B %Y"): (m.start_time.date(), m.end_time.date()) for m in months}
+        label = "Months (pick one or more)"
     else:
-        labels = {}
+        options = {}
         monday = hi - dt.timedelta(days=hi.weekday())                         # newest week first
         while monday + dt.timedelta(days=6) >= lo:
             sunday = monday + dt.timedelta(days=6)
-            labels[f"{monday:%b} {monday.day} – {sunday:%b} {sunday.day}, {sunday.year}"] = (monday, sunday)
+            options[f"{monday:%b} {monday.day} – {sunday:%b} {sunday.day}, {sunday.year}"] = (monday, sunday)
             monday -= dt.timedelta(days=7)
-        label = "Week (Monday – Sunday)"
-    choice = c2.selectbox(label, list(labels), key=f"{key}_{view}")
-    a, b = labels[choice]
-    return max(a, lo), min(b, hi)
+        label = "Weeks, Monday – Sunday (pick one or more)"
+    names = list(options)
+    chosen = c2.multiselect(label, names, default=names[:1], key=f"{key}_{view}_multi",
+                            placeholder="Pick one or more")
+    if not chosen:
+        c2.caption(f"Nothing picked, showing {names[0]}.")
+        chosen = names[:1]
+    return [(max(options[n][0], lo), min(options[n][1], hi)) for n in chosen]
 
 
 QUICK_RANGES = ["All dates", "This month", "Last month", "Last 7 days", "Last 30 days"]
@@ -529,12 +537,12 @@ def date_picker(key, default_start, default_end, lo, hi):
     return s, e
 
 
-def checklist_filter(label, options, key, cols=3):
+def checklist_filter(label, options, key, cols=3, default_off=()):
     """A compact button ("People: all 7") that opens a checklist with Select all / Clear all.
     Returns the checked options."""
     keys = {opt: f"{key}_{i}_{opt}" for i, opt in enumerate(options)}
-    for k in keys.values():
-        st.session_state.setdefault(k, True)
+    for opt, k in keys.items():
+        st.session_state.setdefault(k, opt not in default_off)
 
     def set_all(value):
         for k in keys.values():
@@ -674,12 +682,14 @@ with tab_calls:
         lo, hi = calls.datetime.min().date(), calls.datetime.max().date()
         f1, f2 = st.columns([3, 2])
         with f1:
-            s, e = period_picker("calls_period", lo, hi)
+            periods = period_picker("calls_period", lo, hi)
         with f2:
             people = sorted(calls.person.unique())
             pick = checklist_filter("People", people, key="calls_people")
-        mask = (calls.datetime >= pd.Timestamp(s)) & (calls.datetime < pd.Timestamp(e) + pd.Timedelta(days=1)) \
-            & calls.person.isin(pick)
+        in_period = pd.Series(False, index=calls.index)
+        for a_, b_ in periods:
+            in_period |= (calls.datetime >= pd.Timestamp(a_)) & (calls.datetime < pd.Timestamp(b_) + pd.Timedelta(days=1))
+        mask = in_period & calls.person.isin(pick)
         c = calls[mask & calls.direction.isin(["Inbound", "Outbound"])]   # internal calls left out
         # Three separate groups, no overlap: answered inbound, connected outbound, missed (either way)
         c = c.assign(kind=np.where(c.missed, "Missed", c.direction))
@@ -980,7 +990,9 @@ with tab_sales:
         with f1:
             s, e = date_picker(f"sales_range_{lo}_{hi}", lo, hi, lo, hi)
         with f2:
-            pick = checklist_filter("Branches", branch_options, key="br")
+            pick = checklist_filter("Branches", branch_options, key="br",
+                                    default_off=[b for b in DEFAULT_EXCLUDED_BRANCHES + [SETTER_BRANCH, NO_CREATOR]
+                                                 if b in branch_options])
         all_picked = set(pick) == set(branch_options)
         scope = "All company" if all_picked else "Selected branches"
 
@@ -1163,27 +1175,47 @@ with tab_sales:
                                "Installed $": "${:,.0f}",
                                **{c: fmt_pct for c in ["Apt / Leads", "Order / Leads"]}})
                       .apply(summary_rows, axis=1))
-            st.dataframe(styled, height=min(38 * (len(show) + 1) + 4, 680))
+            st.caption("Click a sales rep's row to see their appointments (with lead IDs) right below the table.")
+            picked_row = st.dataframe(styled, height=min(38 * (len(show) + 1) + 4, 680), key="rep_table",
+                                      on_select="rerun", selection_mode="single-row")
+            rows_sel = picked_row.selection.rows if picked_row and hasattr(picked_row, "selection") else []
+            clicked = show.index[rows_sel[0]] if rows_sel else None
+            if clicked in t.index and st.session_state.get("_last_clicked_rep") != clicked:
+                st.session_state["sales_apt_rep"] = clicked              # jump the detail list to that rep
+                st.session_state["sales_apt_kind"] = "Set up by appointment setters"
+            st.session_state["_last_clicked_rep"] = clicked
             st.download_button("Download CSV", t.to_csv().encode("utf-8-sig"),
                                file_name=f"sales_vs_setters_{s:%Y%m%d}_{e:%Y%m%d}.csv", mime="text/csv")
 
         with st.container(border=True):
             st.markdown("#### Appointments by sales rep (detail)")
-            st.caption("Every appointment counted in the table above, one row per lead, so you can check a rep's numbers.")
-            who = st.selectbox("Sales rep", ["All sales reps"] + list(t.index), key="sales_apt_rep")
-            apt_list = R[R.is_any_apt & own & R.rep.isin(reps if who == "All sales reps" else [who])]
+            st.caption("The leads behind the numbers in the table, one row per lead. Click a row in the table above "
+                       "to jump here, or pick a rep below.")
+            d1, d2 = st.columns([2, 3])
+            rep_options = ["All sales reps"] + list(t.index)
+            if st.session_state.get("sales_apt_rep") not in rep_options:
+                st.session_state["sales_apt_rep"] = "All sales reps"
+            who = d1.selectbox("Sales rep", rep_options, key="sales_apt_rep")
+            kind = d2.radio("Show", ["Set up by appointment setters", "All appointments"], horizontal=True,
+                            key="sales_apt_kind")
+            flag = R.is_setter_apt if kind == "Set up by appointment setters" else R.is_any_apt
+            apt_list = R[flag & own & R.rep.isin(reps if who == "All sales reps" else [who])]
             apt_list = (apt_list.sort_values("apt_date")
                         .drop_duplicates("lead", keep="last")
                         .assign(**{"Set up on": lambda x: x.apt_date.dt.strftime("%m/%d/%Y %H:%M"),
                                    "Status": lambda x: np.where(x.cancelled, "Cancelled", "Set up"),
                                    "Ordered": lambda x: np.where(x.ordered, "Yes", "")})
-                        .rename(columns={"lead": "Lead", "apt_by": "Set by (apt salesname)",
-                                         "apt_branch": "Branch", "owner": "Lead owner"})
-                        [["Lead", "Set by (apt salesname)", "Branch", "Lead owner", "Set up on", "Status", "Ordered"]]
+                        .rename(columns={"lead": "Lead ID", "apt_by": "Set by", "apt_branch": "Set by team",
+                                         "rep": "Sales rep (lead owner)"})
+                        [["Lead ID", "Sales rep (lead owner)", "Set by", "Set by team", "Set up on", "Status", "Ordered"]]
                         .sort_values("Set up on"))
+            cfg = {}
+            if CRM_LEAD_URL:
+                apt_list.insert(1, "Open in CRM", apt_list["Lead ID"].map(lambda i: CRM_LEAD_URL.format(lead=i)))
+                cfg["Open in CRM"] = st.column_config.LinkColumn("Open in CRM", display_text="Open lead")
             n_set = int((apt_list.Status == "Set up").sum())
             st.markdown(f"**{len(apt_list):,} appointments**: {n_set:,} set up, {len(apt_list) - n_set:,} cancelled")
-            st.dataframe(apt_list, hide_index=True, height=380)
+            st.dataframe(apt_list, hide_index=True, height=380, column_config=cfg)
             st.download_button("Download this list", apt_list.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"appointments_{who.replace(' ', '_')}_{s:%Y%m%d}_{e:%Y%m%d}.csv",
                                mime="text/csv", key="sales_apt_dl")
