@@ -86,7 +86,7 @@ CHART_MIN_LEADS = 5   # charts only show sales reps with at least this many lead
 # Leads with no creator (e.g. Web) and the appointment setters team are always left out too.
 EXCLUDED_BRANCHES = ["CSR Staff", "National Sales Team", "Service Staff", "Commercial"]
 # Link to a lead in the CRM. {lead} is replaced with the leads_id. Leave "" to hide the link column.
-CRM_LEAD_URL = ""   # e.g. "https://your-crm.example.com/leads/view.php?id={lead}"
+CRM_LEAD_URL = "https://www.mylifesourcewater.com/webcrm/expandedleads.php?leads_id={lead}"
 
 # Used only to build demo data
 SETTER_DEPT = "Appointment Setter"
