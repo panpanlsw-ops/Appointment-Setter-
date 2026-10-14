@@ -274,6 +274,8 @@ def setter_data(tabs):
     extra = [c for c in ("path", "path_detail") if c in a.columns]
     for c in extra:
         apts[c] = text(a[c])
+    apts["owner"] = clean_name(a[ALL_COLS["owner"]]) if ALL_COLS["owner"] in a.columns else ""
+    leads["owner"] = clean_name(l[ALL_COLS["owner"]]) if ALL_COLS["owner"] in l.columns else ""
     leads = leads[(leads.setter != "") & leads.date.notna()]
     apts = apts[(apts.setter != "") & apts.date.notna()]
     return leads, apts
@@ -938,11 +940,47 @@ with tab_setters:
         with st.container(border=True):
             st.markdown("#### By setter")
             t.index.name = "Setter"
-            st.dataframe(t, height=38 * (len(t) + 1) + 4, column_config={
+            st.caption("Click a number in Appointments (or Leads, Cancelled, Orders) to list those leads, "
+                       "with a link to each lead in the CRM, right below the table.")
+            picked_s = st.dataframe(t, height=38 * (len(t) + 1) + 4, key="setter_table",
+                                    on_select="rerun", selection_mode="single-cell", column_config={
                 "Apt / Leads": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100),
                 "Cancel rate": st.column_config.NumberColumn(format="%.1f%%"),
                 "Order / Apt": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100),
             }, column_order=["Leads", "Appointments", "Cancelled", "Orders", "Apt / Leads", "Order / Apt", "Cancel rate"])
+
+            # ---- the leads behind the clicked number
+            sources = {"Appointments": active, "Cancelled": As[As.status == "Cancelled"],
+                       "Orders": As[As.ordered], "Leads": Ls}
+            cells = picked_s.selection.cells if picked_s is not None and hasattr(picked_s, "selection") else []
+            if cells:
+                row_pos, col = cells[0]
+                who = t.index[row_pos]
+                if col not in sources:
+                    st.info(f"Click a number in one of these columns to see the leads: {', '.join(sources)}.")
+                else:
+                    src = sources[col]
+                    hit = (src if who == "Total" else src[src.setter == who]).sort_values("date").drop_duplicates("lead", keep="last")
+                    leads_tbl = pd.DataFrame({
+                        "Lead": hit.lead.map(lambda i: CRM_LEAD_URL.format(lead=i)) if CRM_LEAD_URL else hit.lead,
+                        "Setter": hit.setter,
+                        ("Lead created on" if col == "Leads" else "Set up on"):
+                            hit.date.dt.strftime("%m/%d/%Y" if col == "Leads" else "%m/%d/%Y %H:%M"),
+                    })
+                    if col != "Leads":
+                        leads_tbl["Status"] = np.where(hit.status == "Cancelled", "Cancelled", "Set up")
+                        leads_tbl["Ordered"] = np.where(hit.ordered, "Yes", "")
+                    if "owner" in hit.columns and (hit.owner != "").any():
+                        leads_tbl["Sales rep (lead owner)"] = hit.owner
+                    st.markdown(f"##### {who} · {col}: {len(leads_tbl):,} leads")
+                    cfg = ({"Lead": st.column_config.LinkColumn("Lead (click to open in CRM)",
+                                                                display_text=r"leads_id=(\d+)")}
+                           if CRM_LEAD_URL else {})
+                    st.dataframe(leads_tbl, hide_index=True, column_config=cfg,
+                                 height=min(38 * (len(leads_tbl) + 1) + 4, 420))
+                    st.download_button("Download these leads", leads_tbl.to_csv(index=False).encode("utf-8-sig"),
+                                       file_name=f"{who.replace(' ', '_')}_{col}.csv", mime="text/csv",
+                                       key="setter_clicked_dl")
 
         with st.container(border=True):
             h, m = st.columns([3, 2])
