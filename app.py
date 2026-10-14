@@ -1033,13 +1033,6 @@ with tab_setters:
             labels = bars.mark_text(dy=-8, fontSize=11, color=MUTED).encode(text="count:Q")
             st.altair_chart((bars + labels).properties(height=260), width="stretch")
 
-        with st.expander(f"Appointment list ({len(As):,})"):
-            detail = As.sort_values("date", ascending=False).rename(columns={
-                "lead": "Lead", "date": "Set up on", "setter": "Setter", "status": "Status",
-                "ordered": "Ordered", "path": "Path", "path_detail": "Path detail"})
-            st.dataframe(detail, hide_index=True)
-            st.download_button("Download CSV", detail.to_csv(index=False).encode("utf-8-sig"),
-                               file_name=f"appointments_{s:%Y%m%d}_{e:%Y%m%d}.csv", mime="text/csv")
 
 # ---------------------------------------------------------------- TAB 3
 with tab_sales:
@@ -1209,69 +1202,81 @@ with tab_sales:
 
         with st.container(border=True):
             st.markdown("#### By sales rep")
-            st.caption(f"Sales rep = {ALL_COLS['owner']} + {OFFICE_COL}: people with the same name in different "
-                       f"offices are separate rows, shown as “Name (Office)”. Every number in a rep's row is counted on the leads they own "
-                       f"(unique leads_id): Leads, the appointments on those leads (All = Set up + Cancelled, whoever set "
-                       f"them), Apts from setters = those appointments set up by the appointment setters department, "
-                       f"and the Orders, Installs and Installed $ ({INSTALL_COLS['amount']}) on those leads. "
-                       f"Branch = {OFFICE_COL}. Leads by {ALL_COLS['lead_date']}, appointments by {ALL_COLS['apt_date']}, "
-                       f"orders and installs by the appointment date. The Appointment setters row counts the leads "
-                       f"the setters department created, the same way.")
-            st.caption("Sorted by leads, then appointments, then orders.")
-            # Rows sorted by orders, then two summary rows like the design
-            show = t.copy()
+            st.caption(f"Two rows per sales rep ({ALL_COLS['owner']} + {OFFICE_COL}), both counted on the leads the rep owns: "
+                       f"Set by sales = appointments not set by the appointment setters (the rep or other sales staff), "
+                       f"plus orders on leads without an appointment. Set by setters = appointments the appointment "
+                       f"setters department set up. Orders, installs and Installed $ follow the appointment's row. "
+                       f"Apt / Leads = set up ÷ the rep's leads; Order / Apt = orders ÷ set up. Sorted by leads.")
+            setter_row = is_setter_branch(R.apt_branch)
+            SETBY = {"Set by sales": ~setter_row, "Set by setters": setter_row}
 
-            def as_row(m):
-                d = m.to_dict()
-                d["All appointments"] = d["Appointments"] + d["Cancelled"]
-                d["Set up (active)"] = d.pop("Appointments")
-                return d
-            setter_apts = lambda m: int(R[R.is_setter_apt & m].lead.nunique())
-            summary = pd.DataFrame([
-                {"Branch": "", **as_row(sales_tot), "Apts from setters": setter_apts(R.owner.isin(reps))},
-                {"Branch": "", **as_row(setters), "Apts from setters": setter_apts(is_setter_branch(R.branch))},
-                {"Branch": "", **as_row(company), "Apts from setters": setter_apts(in_scope.reindex(R.index, fill_value=False))},
-            ], index=["All sales reps", "Appointment setters", scope])
-            show = pd.concat([show, summary[show.columns]])
-            for col in ["Leads", "All appointments", "Set up (active)", "Cancelled", "Apts from setters", "Orders", "Installs"]:
-                show[col] = show[col].astype(int)
-            show.index.name = "Sales rep"
+            def split_counts(mask):
+                """Counts for one group of rows: appointments, set up, cancelled, orders, installs, $."""
+                sub = R[mask]
+                n_inst, amt = installs(sub)
+                return {"All appointments": sub[sub.is_any_apt].lead.nunique(),
+                        "Set up (active)": sub[sub.is_apt].lead.nunique(),
+                        "Cancelled": sub[sub.is_cancel].lead.nunique(),
+                        "Orders": sub[sub.is_order].lead.nunique(),
+                        "Installs": n_inst, "Installed $": amt}
 
-            def summary_rows(row):
-                if row.name in ("All sales reps", scope):
-                    return ["font-weight: 700; border-top: 2px solid #1B2230"] * len(row)
-                if row.name == "Appointment setters":
-                    return [f"color: {BLUE}; font-weight: 600"] * len(row)
-                return [""] * len(row)
+            rows, meta = [], []
+            order = list(t.index)                                        # reps sorted by leads
+            for who in order + ["All sales reps"]:
+                base = own if who == "All sales reps" else own & (R.rep == who)
+                n_leads = R[base & R.is_lead].lead.nunique()
+                branch = "" if who == "All sales reps" else t.loc[who, "Branch"]
+                for k, (label, cond) in enumerate(SETBY.items()):
+                    c_ = split_counts(base & cond)
+                    rows.append({"Branch": branch if k == 0 else "", "Sales rep": who if k == 0 else "",
+                                 "Set by": label, "Leads": n_leads if k == 0 else np.nan, **c_,
+                                 "Apt / Leads": c_["Set up (active)"] / n_leads * 100 if n_leads else np.nan,
+                                 "Order / Apt": (c_["Orders"] / c_["Set up (active)"] * 100
+                                                 if c_["Set up (active)"] else np.nan)})
+                    meta.append((who, label))
+            two = pd.DataFrame(rows)
 
-            styled = (show.style
-                      .format({**{c: "{:,.0f}" for c in ["Leads", "All appointments", "Set up (active)", "Cancelled",
-                                                         "Apts from setters", "Orders", "Installs"]},
-                               "Installed $": "${:,.0f}",
-                               **{c: fmt_pct for c in ["Apt / Leads", "Order / Leads"]}})
-                      .apply(summary_rows, axis=1))
-            st.caption("Click a number in Apts from setters (or in any count column) to list those leads, "
-                       "with a link to each lead in the CRM, right below the table.")
-            picked = st.dataframe(styled, height=min(38 * (len(show) + 1) + 4, 680), key="rep_table",
-                                  on_select="rerun", selection_mode="single-cell")
-            st.download_button("Download CSV", t.to_csv().encode("utf-8-sig"),
+            def row_style(row):
+                who, label = meta[row.name]
+                css = "background-color: #EEF6E8;" if label == "Set by setters" else ""
+                if who == "All sales reps":
+                    css += " font-weight: 700;"
+                if label == "Set by sales":
+                    css += f" border-top: 1px solid {CRM_TAB_BORDER};"
+                return [css] * len(row)
+
+            # Show numbers as text so empty cells stay empty (no "None")
+            disp = two.copy()
+            num = lambda v: "" if pd.isna(v) else f"{int(v):,}"
+            for c_ in ["Leads", "All appointments", "Set up (active)", "Cancelled", "Orders", "Installs"]:
+                disp[c_] = disp[c_].map(num)
+            disp["Installed $"] = disp["Installed $"].map(lambda v: "" if pd.isna(v) else f"${v:,.0f}")
+            for c_ in ["Apt / Leads", "Order / Apt"]:
+                disp[c_] = disp[c_].map(lambda v: "" if pd.isna(v) else f"{v:.1f}%")
+            right = ["Leads", "All appointments", "Set up (active)", "Cancelled", "Orders", "Installs",
+                     "Installed $", "Apt / Leads", "Order / Apt"]
+            styled = disp.style.apply(row_style, axis=1)
+            st.caption("Click a number to list those leads, with a link to each lead in the CRM, right below the table.")
+            picked = st.dataframe(styled, hide_index=True, key="rep_table", on_select="rerun",
+                                  selection_mode="single-cell", height=min(36 * (len(two) + 1) + 4, 720),
+                                  column_config={c_: st.column_config.TextColumn(c_, alignment="right") for c_ in right})
+            st.download_button("Download CSV", two.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"sales_vs_setters_{s:%Y%m%d}_{e:%Y%m%d}.csv", mime="text/csv")
 
             # ---- the leads behind the clicked number
-            CLICK_FLAGS = {"Apts from setters": "is_setter_apt", "All appointments": "is_any_apt",
-                           "Set up (active)": "is_apt", "Cancelled": "is_cancel", "Leads": "is_lead",
-                           "Orders": "is_order", "Installs": "is_install"}
+            CLICK_FLAGS = {"Leads": "is_lead", "All appointments": "is_any_apt", "Set up (active)": "is_apt",
+                           "Cancelled": "is_cancel", "Orders": "is_order", "Installs": "is_install"}
             cells = picked.selection.cells if picked is not None and hasattr(picked, "selection") else []
             if cells:
                 row_pos, col = cells[0]
-                who = show.index[row_pos]
+                who, label = meta[row_pos]
                 if col not in CLICK_FLAGS:
                     st.info(f"Click a number in one of these columns to see the leads: {', '.join(CLICK_FLAGS)}.")
-                elif who not in t.index and who != "All sales reps":
-                    st.info("Click a number in a sales rep's row (or the All sales reps row) to see the leads.")
                 else:
-                    who_mask = own if who == "All sales reps" else (own & (R.rep == who))
-                    hit = R[R[CLICK_FLAGS[col]] & who_mask].sort_values("apt_date").drop_duplicates("lead", keep="last")
+                    base = own if who == "All sales reps" else own & (R.rep == who)
+                    if col != "Leads":
+                        base = base & SETBY[label]
+                    hit = R[R[CLICK_FLAGS[col]] & base].sort_values("apt_date").drop_duplicates("lead", keep="last")
                     leads_tbl = pd.DataFrame({
                         "Lead": (hit.lead.map(lambda i: CRM_LEAD_URL.format(lead=i)) if CRM_LEAD_URL else hit.lead),
                         "Sales rep (lead owner)": hit.rep,
@@ -1279,9 +1284,10 @@ with tab_sales:
                         "Set by team": hit.apt_branch,
                         "Set up on": hit.apt_date.dt.strftime("%m/%d/%Y %H:%M").fillna(""),
                         "Status": np.where(hit.cancelled, "Cancelled", np.where(hit.active, "Set up", "")),
-                        "Ordered": np.where(hit.ordered, "Yes", ""),
+                        "Order / install amount": hit.is_amount.map(lambda v: "" if pd.isna(v) else f"${v:,.0f}"),
                     })
-                    st.markdown(f"##### {who} · {col}: {len(leads_tbl):,} leads")
+                    what = col if col == "Leads" else f"{col} · {label.lower()}"
+                    st.markdown(f"##### {who} · {what}: {len(leads_tbl):,} leads")
                     cfg = ({"Lead": st.column_config.LinkColumn("Lead (click to open in CRM)",
                                                                 display_text=r"leads_id=(\d+)")}
                            if CRM_LEAD_URL else {})
