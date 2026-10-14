@@ -79,6 +79,18 @@ ALL_COLS = {
 # Values like "Andrew Higgins - Pasadena Team - Pasadena" are cut to the part after the last "-" ("Pasadena").
 OFFICE_COL = "Regional Office"
 
+# Region shown in the clicked lists on the Setter performance tab: Regional Office -> region.
+# Offices not listed show no region. Edit freely.
+REGION_OF_OFFICE = {
+    "Arizona": "Desert", "Las Vegas": "Desert",
+    "Orange County": "SoCal", "Pasadena": "SoCal", "Inland Empire": "SoCal", "San Diego": "SoCal",
+    "Ventura/SB County": "SoCal", "Central Coast": "SoCal",
+    "Bay Area": "NorCal", "Sacramento": "NorCal", "Fresno": "NorCal",
+    "Austin": "Texas", "San Antonio": "Texas",
+}
+# Order amount shown in those lists: the first of these columns found in the sheet
+ORDER_AMOUNT_COLS = ["sales amount", "IS amount"]
+
 # Installs (optional columns in the all company tab)
 INSTALL_COLS = {"amount": "IS amount", "rep": "IS reps"}   # installed system: sales amount + who sold it
 CHART_MIN_LEADS = 5   # charts only show sales reps with at least this many leads
@@ -274,8 +286,12 @@ def setter_data(tabs):
     extra = [c for c in ("path", "path_detail") if c in a.columns]
     for c in extra:
         apts[c] = text(a[c])
-    apts["owner"] = clean_name(a[ALL_COLS["owner"]]) if ALL_COLS["owner"] in a.columns else ""
-    leads["owner"] = clean_name(l[ALL_COLS["owner"]]) if ALL_COLS["owner"] in l.columns else ""
+    for df, src in ((apts, a), (leads, l)):
+        df["owner"] = clean_name(src[ALL_COLS["owner"]]) if ALL_COLS["owner"] in src.columns else ""
+        df["office"] = clean_office(src[OFFICE_COL]) if OFFICE_COL in src.columns else ""
+        amt_col = next((c_ for c_ in ORDER_AMOUNT_COLS if c_ in src.columns), None)
+        df["amount"] = (pd.to_numeric(text(src[amt_col]).str.replace(r"[$,]", "", regex=True), errors="coerce")
+                        if amt_col else np.nan)
     leads = leads[(leads.setter != "") & leads.date.notna()]
     apts = apts[(apts.setter != "") & apts.date.notna()]
     return leads, apts
@@ -961,24 +977,40 @@ with tab_setters:
                 else:
                     src = sources[col]
                     hit = (src if who == "Total" else src[src.setter == who]).sort_values("date").drop_duplicates("lead", keep="last")
-                    leads_tbl = pd.DataFrame({
-                        "Lead": hit.lead.map(lambda i: CRM_LEAD_URL.format(lead=i)) if CRM_LEAD_URL else hit.lead,
-                        "Setter": hit.setter,
-                        ("Lead created on" if col == "Leads" else "Set up on"):
-                            hit.date.dt.strftime("%m/%d/%Y" if col == "Leads" else "%m/%d/%Y %H:%M"),
+                    # Report layout: Day | Region | Rep | count | Link | Scheduled by | Order amount
+                    region = (hit.office.map(REGION_OF_OFFICE).fillna("Other").where(hit.office != "", "Other")
+                              if "office" in hit.columns else "Other")
+                    rpt = pd.DataFrame({
+                        "Day": hit.date.dt.normalize(),
+                        "Region": region,
+                        "Rep": hit.owner if "owner" in hit.columns else "",
+                        "Appts scheduled" if col != "Leads" else "Leads": 1,
+                        "Link": hit.lead.map(lambda i: CRM_LEAD_URL.format(lead=i)) if CRM_LEAD_URL else hit.lead,
+                        "Scheduled by" if col != "Leads" else "Created by": hit.setter.str.split().str[0],
+                        "Order amount": np.where(hit.ordered if "ordered" in hit.columns else False,
+                                                 hit.amount, np.nan) if "amount" in hit.columns else np.nan,
                     })
-                    if col != "Leads":
-                        leads_tbl["Status"] = np.where(hit.status == "Cancelled", "Cancelled", "Set up")
-                        leads_tbl["Ordered"] = np.where(hit.ordered, "Yes", "")
-                    if "owner" in hit.columns and (hit.owner != "").any():
-                        leads_tbl["Sales rep (lead owner)"] = hit.owner
-                    st.markdown(f"##### {who} · {col}: {len(leads_tbl):,} leads")
-                    cfg = ({"Lead": st.column_config.LinkColumn("Lead (click to open in CRM)",
-                                                                display_text=r"leads_id=(\d+)")}
-                           if CRM_LEAD_URL else {})
-                    st.dataframe(leads_tbl, hide_index=True, column_config=cfg,
-                                 height=min(38 * (len(leads_tbl) + 1) + 4, 420))
-                    st.download_button("Download these leads", leads_tbl.to_csv(index=False).encode("utf-8-sig"),
+                    if col == "Cancelled":
+                        rpt.insert(rpt.columns.get_loc("Scheduled by") + 1, "Status", "Cancelled")
+                    rpt = (rpt.assign(_r=rpt.Region.replace("Other", "~"))          # "Other" last in each day
+                           .sort_values(["Day", "_r", "Rep"]).drop(columns="_r"))
+                    # show each day / region only on the first row of its group, like a report
+                    first_day = ~rpt.Day.duplicated()
+                    first_reg = ~rpt.duplicated(["Day", "Region"])
+                    rpt["Region"] = np.where(first_reg, rpt.Region, "")
+                    rpt["Day"] = np.where(first_day, rpt.Day.dt.strftime("%m/%d/%Y"), "")
+                    count_col = "Appts scheduled" if col != "Leads" else "Leads"
+                    total = pd.DataFrame([{"Day": "", "Region": "", "Rep": "Total", count_col: int(rpt[count_col].sum()),
+                                           "Link": "", "Order amount": rpt["Order amount"].sum(min_count=1)}])
+                    rpt = pd.concat([rpt, total], ignore_index=True)
+                    rpt["Order amount"] = rpt["Order amount"].map(lambda v: "" if pd.isna(v) else f"${v:,.0f}")
+                    st.markdown(f"##### {who} · {col}: {len(hit):,} leads")
+                    cfg = {count_col: st.column_config.NumberColumn(format="%d")}
+                    if CRM_LEAD_URL:
+                        cfg["Link"] = st.column_config.LinkColumn("Links")
+                    st.dataframe(rpt, hide_index=True, column_config=cfg,
+                                 height=min(38 * (len(rpt) + 1) + 4, 460))
+                    st.download_button("Download these leads", rpt.to_csv(index=False).encode("utf-8-sig"),
                                        file_name=f"{who.replace(' ', '_')}_{col}.csv", mime="text/csv",
                                        key="setter_clicked_dl")
 
