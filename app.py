@@ -843,38 +843,30 @@ with tab_calls:
 
         with st.container(border=True):
             st.markdown("#### Missed calls by hour of day")
-            missed = c[c.kind == "Missed"]
+            # Only Call Result = "Missed Call" (voicemail and hung up are left out), split inbound / outbound
+            missed = c[c.result == "Missed Call"]
             if missed.empty:
                 st.caption("No missed calls in this range.")
             else:
-                # Same three groups as the cards: Missed / Voicemail / Hung up (hold)
-                missed = missed.assign(type=np.select(
-                    [missed.result == "Missed Call", missed.result == "Sent to voicemail"],
-                    ["Missed", "Voicemail"], "Hung up (hold)"))
-                mh = (missed.groupby(["hour", "type"])
-                      .agg(missed=("direction", "size"),
-                           inbound=("direction", lambda d: int((d == "Inbound").sum())),
-                           outbound=("direction", lambda d: int((d == "Outbound").sum())))
-                      .reset_index())
-                mh["order"] = mh.type.map({"Missed": 0, "Voicemail": 1, "Hung up (hold)": 2})
+                mh = missed.groupby(["hour", "direction"]).size().rename("missed").reset_index()
+                mh["order"] = (mh.direction == "Outbound").astype(int)
                 totals = missed.groupby("hour").size().rename("total").reset_index()
                 worst = totals.sort_values("total", ascending=False).head(3)
                 bars = alt.Chart(mh).mark_bar(cornerRadiusTopLeft=2, cornerRadiusTopRight=2).encode(
                     x=alt.X("hour:O", title="Hour of day (8 = 8:00–8:59)", axis=alt.Axis(labelAngle=0)),
                     y=alt.Y("missed:Q", title="Missed calls"),
-                    color=alt.Color("type:N", title=None, legend=alt.Legend(orient="top"),
-                                    sort=["Missed", "Voicemail", "Hung up (hold)"],
-                                    scale=alt.Scale(domain=["Missed", "Voicemail", "Hung up (hold)"],
-                                                    range=["#C9DD8F", "#5E9C76", "#0A5E2E"])),
+                    color=alt.Color("direction:N", title=None, legend=alt.Legend(orient="top"),
+                                    sort=["Inbound", "Outbound"],
+                                    scale=alt.Scale(domain=["Inbound", "Outbound"], range=[BLUE, "#C9DD8F"])),
                     order=alt.Order("order:Q"),
-                    tooltip=[alt.Tooltip("hour:O", title="Hour"), alt.Tooltip("type:N", title="Type"),
-                             alt.Tooltip("missed:Q", title="Calls"), alt.Tooltip("inbound:Q", title="Inbound"),
-                             alt.Tooltip("outbound:Q", title="Outbound")])
+                    tooltip=[alt.Tooltip("hour:O", title="Hour"), alt.Tooltip("direction:N", title="Direction"),
+                             alt.Tooltip("missed:Q", title="Missed calls")])
                 labels = alt.Chart(totals).mark_text(dy=-8, fontSize=12, fontWeight="bold", color=INK).encode(
                     x="hour:O", y="total:Q", text="total:Q")
                 st.altair_chart((bars + labels).properties(height=280), width="stretch")
-                st.caption("Each bar = calls that didn't connect during that hour, split the same way as the cards: "
-                           "Missed (no one picked up), Voicemail, Hung up (hold). Hover for inbound / outbound. "
+                n_in, n_out = int((missed.direction == "Inbound").sum()), int((missed.direction == "Outbound").sum())
+                st.caption(f"Each bar = calls with Call Result “Missed Call” in that hour: {n_in:,} inbound, "
+                           f"{n_out:,} outbound in total. Voicemail and hung up calls are not included. "
                            "Most missed calls: " + ", ".join(f"{int(h)}:00 ({n})" for h, n in zip(worst.hour, worst.total)) + ".")
 
 
