@@ -1114,8 +1114,10 @@ with tab_sales:
                      is_setter_apt=(R.is_apt | R.is_cancel) & is_setter_branch(R.apt_branch))
 
         # Benchmark row: leads the appointment setters department created, counted the same way
-        setter_leads = is_setter_branch(R.branch)
-        setters = group_totals(setter_leads, setter_leads, setter_leads, setter_leads)
+        # Same rule as the Setter performance tab: leads the setters department CREATED,
+        # and appointments (plus their orders / installs) the setters department SET UP
+        setter_leads, setter_apts = is_setter_branch(R.branch), is_setter_branch(R.apt_branch)
+        setters = group_totals(setter_leads, setter_apts, setter_apts, setter_apts)
 
         # Each rep's branch = their Regional Office (most common one on the leads they own)
         def mode_branch(df):
