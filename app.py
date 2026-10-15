@@ -894,9 +894,9 @@ with tab_setters:
         Ls = in_range(s_leads, s, e, "date");  Ls = Ls[Ls.setter.isin(pick)]
         As = in_range(s_apts, s, e, "date");   As = As[As.setter.isin(pick)]
 
-        # Appointments = still active (not cancelled). Cancelled ones are counted separately
-        # and are NOT included in Appointments or in the ratios.
-        active = As[As.status == "Active"]
+        # Appointments = every appointment booked, cancelled ones included.
+        # Cancelled is shown separately as the part of them that was cancelled.
+        active = As
         t = pd.DataFrame(index=pick)
         t["Leads"] = Ls.groupby("setter").lead.nunique()
         t["Appointments"] = active.groupby("setter").lead.nunique()
@@ -906,7 +906,7 @@ with tab_setters:
         t = t.reindex(columns=cols).fillna(0).astype(int).sort_values(["Leads", "Appointments", "Orders"], ascending=False)
         t = with_total(t, cols, [("Apt / Leads", "Appointments", "Leads"),
                                  ("Order / Apt", "Orders", "Appointments")])
-        t["Cancel rate"] = pct(t["Cancelled"], t["Appointments"] + t["Cancelled"])
+        t["Cancel rate"] = pct(t["Cancelled"], t["Appointments"])
         tot = t.loc["Total"]
 
         kpi_strip([
@@ -933,8 +933,8 @@ with tab_setters:
                           + base.mark_text(align="left", dx=8, fontSize=18, fontWeight="bold", color=INK).encode(
                               x="value:Q", text=alt.Text("value:Q", format=",")))
                 st.altair_chart(funnel.properties(height=200), width="stretch")
-                st.caption(f"{int(tot.Cancelled):,} cancelled appointments are left out of Appointments "
-                           f"and the ratios ({fmt_pct(tot['Cancel rate'])} of everything booked).")
+                st.caption(f"Appointments include the {int(tot.Cancelled):,} that were later cancelled "
+                           f"({fmt_pct(tot['Cancel rate'])} of all appointments).")
         with right:
             st.markdown(
                 f'<div class="dash hero"><span class="l">Apt / Leads</span>'
@@ -1012,7 +1012,7 @@ with tab_setters:
             h.markdown("#### Per month")
             metric = m.radio("Show", ["Leads", "Appointments", "Cancelled", "Orders"], index=1,
                              horizontal=True, key="trend_metric", label_visibility="collapsed")
-            src = {"Leads": Ls, "Appointments": As[As.status == "Active"], "Cancelled": As[As.status == "Cancelled"],
+            src = {"Leads": Ls, "Appointments": As, "Cancelled": As[As.status == "Cancelled"],
                    "Orders": As[As.ordered]}[metric]
             trend = src.groupby(src.date.dt.to_period("M")).lead.nunique().rename("count").reset_index()
             trend["month"] = trend.date.dt.to_timestamp()
@@ -1077,13 +1077,15 @@ with tab_sales:
                 return sub.lead.nunique() if by is None else sub.groupby(by).lead.nunique()
             if by is None:
                 n_inst, amt = installs(D)
-                m = pd.Series({"Leads": count(D, "is_lead"), "Appointments": count(D, "is_apt"),
+                m = pd.Series({"Leads": count(D, "is_lead"),
+                               "Appointments": D[D.is_apt | D.is_cancel].lead.nunique(),   # incl. cancelled
                                "Cancelled": count(D, "is_cancel"), "Orders": count(D, "is_order"),
                                "Installs": n_inst, "Installed $": amt}, dtype=float)
                 m["Apt / Leads"] = m.Appointments / m.Leads * 100 if m.Leads else np.nan
                 m["Order / Leads"] = m.Orders / m.Leads * 100 if m.Leads else np.nan
                 return m
-            m = pd.DataFrame({"Leads": count(D, "is_lead"), "Appointments": count(D, "is_apt"),
+            m = pd.DataFrame({"Leads": count(D, "is_lead"),
+                              "Appointments": D[D.is_apt | D.is_cancel].groupby(by).lead.nunique(),
                               "Cancelled": count(D, "is_cancel"), "Orders": count(D, "is_order")})
             m = m.reindex(D[by].unique()).fillna(0).astype(int)
             m["Apt / Leads"] = pct(m.Appointments, m.Leads)
@@ -1099,7 +1101,7 @@ with tab_sales:
         def group_totals(lead_m, apt_m, order_m, inst_m):
             n_inst, amt = installs(R[inst_m])
             m = pd.Series({"Leads": R[R.is_lead & lead_m].lead.nunique(),
-                           "Appointments": R[R.is_apt & apt_m].lead.nunique(),
+                           "Appointments": R[(R.is_apt | R.is_cancel) & apt_m].lead.nunique(),   # incl. cancelled
                            "Cancelled": R[R.is_cancel & apt_m].lead.nunique(),
                            "Orders": R[R.is_order & order_m].lead.nunique(),
                            "Installs": n_inst, "Installed $": amt}, dtype=float)
@@ -1151,7 +1153,7 @@ with tab_sales:
 
         t = pd.DataFrame({"Leads": per_rep("is_lead"),
                           "All appointments": per_rep("is_any_apt"),
-                          "Appointments": per_rep("is_apt"),
+                          "Appointments": per_rep("is_any_apt"),
                           "Cancelled": per_rep("is_cancel"),
                           "Apts from setters": per_rep("is_setter_apt"),
                           "Orders": per_rep("is_order"),
@@ -1200,7 +1202,8 @@ with tab_sales:
                        f"plus orders on leads without an appointment. Set by setters = appointments the appointment "
                        f"setters department set up. Orders, installs and Installed $ follow the appointment's row. "
                        f"Share of appts = this row's appointments ÷ the rep's total appointments (both rows). "
-                       f"Apt / Leads = set up ÷ the rep's leads; Order / Apt = orders ÷ set up. Sorted by leads.")
+                       f"Apt / Leads = all appointments (cancelled included) ÷ the rep's leads; "
+                       f"Order / Apt = orders ÷ all appointments. Sorted by leads.")
             setter_row = is_setter_branch(R.apt_branch)
             SETBY = {"Set by sales": ~setter_row, "Set by setters": setter_row}
 
@@ -1224,9 +1227,9 @@ with tab_sales:
                     c_ = split_counts(base & cond)
                     rows.append({"Branch": branch if k == 0 else "", "Sales rep": who if k == 0 else "",
                                  "Set by": label, "Leads": n_leads if k == 0 else np.nan, **c_,
-                                 "Apt / Leads": c_["Set up (active)"] / n_leads * 100 if n_leads else np.nan,
-                                 "Order / Apt": (c_["Orders"] / c_["Set up (active)"] * 100
-                                                 if c_["Set up (active)"] else np.nan)})
+                                 "Apt / Leads": c_["All appointments"] / n_leads * 100 if n_leads else np.nan,
+                                 "Order / Apt": (c_["Orders"] / c_["All appointments"] * 100
+                                                 if c_["All appointments"] else np.nan)})
                     meta.append((who, label))
             two = pd.DataFrame(rows)
             # Share of the rep's appointments: this row ÷ (set by sales + set by setters)
@@ -1299,30 +1302,3 @@ with tab_sales:
                     st.download_button("Download these leads", leads_tbl.to_csv(index=False).encode("utf-8-sig"),
                                        file_name=f"{who.replace(' ', '_')}_{col.replace(' ', '_')}.csv",
                                        mime="text/csv", key="clicked_leads_dl")
-
-        def vs_chart(metric):
-            d = t[t.Leads >= CHART_MIN_LEADS].reset_index()[["Sales rep", metric]].dropna()
-            d = d.sort_values(metric, ascending=False).head(20)
-            if d.empty:
-                return None
-            bars = alt.Chart(d).mark_bar(color=INK, cornerRadius=2).encode(
-                y=alt.Y("Sales rep:N", sort=None, title=None, axis=alt.Axis(labelFontSize=12, labelLimit=220)),
-                x=alt.X(f"{metric}:Q", title="%"),
-                tooltip=["Sales rep", alt.Tooltip(f"{metric}:Q", format=".1f")])
-            ref = pd.DataFrame({"v": [setters[metric]], "label": [f"Setters {fmt_pct(setters[metric])}"]})
-            rule = alt.Chart(ref).mark_rule(color=BLUE, strokeWidth=2, strokeDash=[6, 4]).encode(x="v:Q")
-            lab = alt.Chart(ref).mark_text(color=BLUE, align="left", dx=4, dy=-6, fontWeight="bold").encode(
-                x="v:Q", y=alt.value(0), text="label:N")
-            return (bars + rule + lab).properties(height=max(160, 30 * len(d)))
-
-        left, right = st.columns(2, gap="medium")
-        for col, metric in ((left, "Apt / Leads"), (right, "Order / Leads")):
-            with col:
-                with st.container(border=True):
-                    st.markdown(f"#### {metric}: sales reps vs setters")
-                    ch = vs_chart(metric)
-                    if ch is None or pd.isna(setters[metric]):
-                        st.caption(f"No sales rep has {CHART_MIN_LEADS}+ leads in this range.")
-                    else:
-                        st.altair_chart(ch, width="stretch")
-                        st.caption(f"Reps with at least {CHART_MIN_LEADS} leads. Dashed line = appointment setters.")
