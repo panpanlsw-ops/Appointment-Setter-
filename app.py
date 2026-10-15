@@ -953,9 +953,8 @@ with tab_setters:
             picked_s = st.dataframe(t, height=38 * (len(t) + 1) + 4, key="setter_table",
                                     on_select="rerun", selection_mode="single-cell", column_config={
                 "Apt / Leads": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100),
-                "Cancel rate": st.column_config.NumberColumn(format="%.1f%%"),
                 "Order / Apt": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100),
-            }, column_order=["Leads", "Appointments", "Cancelled", "Orders", "Apt / Leads", "Order / Apt", "Cancel rate"])
+            }, column_order=["Leads", "Appointments", "Cancelled", "Orders", "Apt / Leads", "Order / Apt"])
 
             # ---- the leads behind the clicked number
             sources = {"Appointments": active, "Cancelled": As[As.status == "Cancelled"],
