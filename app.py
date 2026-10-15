@@ -1215,7 +1215,7 @@ with tab_sales:
 
             rows, meta = [], []
             order = list(t.index)                                        # reps sorted by leads
-            for who in order + ["All sales reps"]:
+            for who in ["All sales reps"] + order:          # totals first, then each rep
                 base = own if who == "All sales reps" else own & (R.rep == who)
                 n_leads = R[base & R.is_lead].lead.nunique()
                 branch = "" if who == "All sales reps" else t.loc[who, "Branch"]
