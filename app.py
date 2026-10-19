@@ -79,6 +79,17 @@ ALL_COLS = {
 # Values like "Andrew Higgins - Pasadena Team - Pasadena" are cut to the part after the last "-" ("Pasadena").
 OFFICE_COL = "Regional Office"
 
+# ---- Daily performance tab ---------------------------------------------
+DAILY_TAB_NAMES = ["daily performance", "daily_performance", "daily"]   # worksheet name (any case)
+DAILY_COLS = {
+    "lead":   "leads_id",
+    "date":   "date_created",       # when the appointment was scheduled
+    "setter": "apt_set_names",      # appointment setter who scheduled it
+    "branch": "branch_name",        # setter's department (only Appointment Setters rows are used)
+    "owner":  "leads_owner",        # sales rep the lead belongs to
+    "office": "Regional Office",
+}
+
 # Region shown in the clicked lists on the Setter performance tab: Regional Office -> region.
 # Offices not listed show no region. Edit freely.
 REGION_OF_OFFICE = {
@@ -524,10 +535,10 @@ def period_picker(key, lo, hi):
     return [(max(options[n][0], lo), min(options[n][1], hi)) for n in chosen]
 
 
-QUICK_RANGES = ["All dates", "This month", "Last month", "Last 7 days", "Last 30 days"]
+QUICK_RANGES = ["All dates", "Latest day", "This month", "Last month", "Last 7 days", "Last 30 days"]
 
 
-def date_picker(key, default_start, default_end, lo, hi):
+def date_picker(key, default_start, default_end, lo, hi, quick="All dates"):
     """Quick pick + separate From / To boxes (each opens a calendar and closes after one click)."""
     k_from, k_to, k_quick = f"{key}_from", f"{key}_to", f"{key}_quick"
     st.session_state.setdefault(k_from, default_start)
@@ -538,6 +549,7 @@ def date_picker(key, default_start, default_end, lo, hi):
         first = hi.replace(day=1)
         a, b = {
             "All dates": (lo, hi),
+            "Latest day": (hi, hi),
             "This month": (first, hi),
             "Last month": ((first - dt.timedelta(days=1)).replace(day=1), first - dt.timedelta(days=1)),
             "Last 7 days": (hi - dt.timedelta(days=6), hi),
@@ -547,6 +559,7 @@ def date_picker(key, default_start, default_end, lo, hi):
         st.session_state[k_to] = max(min(b, hi), lo)
 
     c1, c2, c3 = st.columns([1.15, 1, 1])
+    st.session_state.setdefault(k_quick, quick)
     c1.selectbox("Quick pick", QUICK_RANGES, key=k_quick, on_change=apply_quick,
                  help=f"Based on the latest date in the sheet ({hi:%m/%d/%Y}).")
     s = c2.date_input("From", min_value=lo, max_value=hi, key=k_from, format="MM/DD/YYYY")
@@ -656,7 +669,13 @@ def demo_tabs():
         "final_status": np.where(~has, "", np.where(canc, "Cancelled", "Set up")),
         "orders salesrepsname": np.where(ordd, fa.salesreps_id.map(name_of), ""),
     })
-    return {LEADS_TAB: leads_create, APT_TAB: apt_created, ALL_TAB: all_company}
+    daily = pd.DataFrame({
+        "leads_id": a.leads_id, "date_created": a.created_date.dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "apt_set_names": a.created_by.map(name_of), "branch_name": "Appointment Setters",
+        "leads_owner": a.salesreps_id.map(name_of),
+        "Regional Office": a.salesreps_id.map(lambda i: ["Orange County", "Pasadena", "Arizona"][int(i) % 3]),
+    })
+    return {LEADS_TAB: leads_create, APT_TAB: apt_created, ALL_TAB: all_company, "daily performance": daily}
 
 
 
@@ -870,8 +889,96 @@ with tab_calls:
                            "Most missed calls: " + ", ".join(f"{int(h)}:00 ({n})" for h, n in zip(worst.hour, worst.total)) + ".")
 
 
+# ---------------------------------------------------------------- DAILY PERFORMANCE (top of Setter performance)
+def render_daily():
+    daily_ws = next((n for n in tabs if n.strip().lower() in DAILY_TAB_NAMES), None)
+    dly = None
+    if daily_ws is None:
+        st.info(f'Add a worksheet named "daily performance" to the Google Sheet to see this tab.')
+    else:
+        raw = tabs[daily_ws]
+        miss = missing_cols(raw, [v for k, v in DAILY_COLS.items() if k != "branch"])
+        if miss:
+            st.error(f'The "{daily_ws}" worksheet is missing {miss}. Headers found: {list(raw.columns)}.')
+        else:
+            dc = DAILY_COLS
+            dly = pd.DataFrame({
+                "lead": text(raw[dc["lead"]]),
+                "when": to_dt(raw[dc["date"]]),
+                "setter": clean_name(raw[dc["setter"]]),
+                "branch": text(raw[dc["branch"]]) if dc["branch"] in raw.columns else SETTER_BRANCH,
+                "owner": clean_name(raw[dc["owner"]]),
+                "office": clean_office(raw[dc["office"]]),
+            })
+            dly = dly[(dly.lead != "") & dly.when.notna()]
+            dly = dly[dly.branch.str.lower() == SETTER_BRANCH.lower()]           # appointment setters only
+            dly["day"] = dly.when.dt.normalize()
+
+    if dly is not None and not dly.empty:
+        st.markdown("### Daily performance")
+        lo, hi = dly.day.min().date(), dly.day.max().date()
+        f1, f2 = st.columns([3, 2])
+        with f1:
+            s, e = date_picker(f"daily_range_{lo}_{hi}", hi, hi, lo, hi, quick="Latest day")   # starts on the latest day
+        with f2:
+            pick = checklist_filter("Scheduled by", sorted(set(dly.setter) - {""}), key="daily_setters")
+        D = in_range(dly, s, e, "day")
+        D = D[D.setter.isin(pick)].sort_values("when").drop_duplicates(["day", "lead"])   # count by leads_id
+
+        kpi_strip([
+            ("Appointments scheduled", f"{len(D):,}", BLUE),
+            ("Days", f"{D.day.nunique():,}", None),
+            ("Sales reps", f"{D.owner.replace('', np.nan).nunique():,}", None),
+            ("Regional offices", f"{D.office.replace('', np.nan).nunique():,}", None),
+        ])
+
+        with st.container(border=True):
+            st.markdown("#### Appointments scheduled by day")
+            st.caption("One row per appointment (counted by leads_id). Rep = the lead's owner; Scheduled by = the "
+                       "appointment setter. Click a link to open the lead in the CRM.")
+            if D.empty:
+                st.caption("No appointments for these dates.")
+            else:
+                D = D.assign(_off=D.office.replace("", "~")).sort_values(["day", "_off", "owner", "when"])
+                rows = []
+                for day, g in D.groupby("day", sort=True):
+                    first_day, last_office = True, None
+                    for _, r in g.iterrows():
+                        rows.append({
+                            "Day": f"{day:%m/%d/%Y}" if first_day else "",
+                            "Regional office": r.office if r.office != last_office else "",
+                            "Rep": r.owner,
+                            "Appts scheduled": 1,
+                            "Links": CRM_LEAD_URL.format(lead=r.lead) if CRM_LEAD_URL else r.lead,
+                            "Scheduled by": r.setter.split()[0] if r.setter else "",
+                        })
+                        first_day, last_office = False, r.office
+                    if D.day.nunique() > 1:
+                        rows.append({"Day": "", "Regional office": "", "Rep": f"{day:%m/%d} total",
+                                     "Appts scheduled": len(g), "Links": "", "Scheduled by": ""})
+                rows.append({"Day": "", "Regional office": "", "Rep": "Total", "Appts scheduled": len(D),
+                             "Links": "", "Scheduled by": ""})
+                rpt = pd.DataFrame(rows)
+
+                def bold_totals(row):
+                    return (["font-weight: 700; background-color: #EEF6E8;"] * len(row)
+                            if str(row["Rep"]).endswith("total") or row["Rep"] == "Total" else [""] * len(row))
+
+                cfg = {"Appts scheduled": st.column_config.NumberColumn(format="%d")}
+                if CRM_LEAD_URL:
+                    cfg["Links"] = st.column_config.LinkColumn("Links")
+                st.dataframe(rpt.style.apply(bold_totals, axis=1), hide_index=True, column_config=cfg,
+                             height=min(36 * (len(rpt) + 1) + 4, 720))
+                st.download_button("Download", rpt.to_csv(index=False).encode("utf-8-sig"),
+                                   file_name=f"daily_performance_{s:%Y%m%d}_{e:%Y%m%d}.csv", mime="text/csv",
+                                   key="daily_dl")
+
+
 # ---------------------------------------------------------------- TAB 2
 with tab_setters:
+    with st.container(border=True):
+        render_daily()
+    st.markdown("### History performance")
     try:
         s_leads, s_apts = setter_data(tabs)
     except ValueError as err:
