@@ -1,0 +1,27 @@
+# Sends the "Appointments scheduled" email every morning.
+# GitHub runs this on its own servers, so no computer has to stay on.
+name: Daily appointments email
+
+on:
+  schedule:
+    - cron: "0 15 * * *"      # 15:00 UTC = 8:00 AM Los Angeles (summer) / 7:00 AM (winter)
+  workflow_dispatch:           # adds a "Run workflow" button to send it by hand
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pandas gspread google-auth
+      - run: python daily_email.py
+        env:
+          GOOGLE_KEY_JSON: ${{ secrets.GOOGLE_KEY_JSON }}
+          SHEET_NAME:      ${{ secrets.SHEET_NAME }}
+          SMTP_HOST:       ${{ secrets.SMTP_HOST }}
+          SMTP_PORT:       ${{ secrets.SMTP_PORT }}
+          SMTP_USER:       ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD:   ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO:        ${{ secrets.EMAIL_TO }}
