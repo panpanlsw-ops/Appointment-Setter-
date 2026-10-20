@@ -79,6 +79,9 @@ ALL_COLS = {
 # Values like "Andrew Higgins - Pasadena Team - Pasadena" are cut to the part after the last "-" ("Pasadena").
 OFFICE_COL = "Regional Office"
 
+# ---- History performance: "Everything in the date range" view -----------
+DATE_ONLY_TAB = "date only"   # every lead that came in + every appointment set up in the range (any lead)
+
 # ---- Daily performance tab ---------------------------------------------
 DAILY_TAB_NAMES = ["daily performance", "daily_performance", "daily"]   # worksheet name (any case)
 DAILY_COLS = {
@@ -987,8 +990,25 @@ with tab_setters:
     with st.container(border=True):
         render_daily()
     st.markdown("### History performance")
+    date_only_ws = next((n for n in tabs if n.strip().lower() == DATE_ONLY_TAB), None)
+    hist_view = st.radio(
+        "View", ["Setter leads", "Everything in the date range"], horizontal=True, key="hist_view",
+        help="Setter leads: leads the setters created, and the appointments / orders on those leads. "
+             "Everything in the date range: every lead that came in, every appointment set up and every "
+             f"order in the dates you pick, no matter when the lead came in (from the “{DATE_ONLY_TAB}” tab).")
     try:
-        s_leads, s_apts = setter_data(tabs)
+        if hist_view == "Everything in the date range":
+            if date_only_ws is None:
+                raise ValueError(f'Add a worksheet named "{DATE_ONLY_TAB}" to the Google Sheet to use this view.')
+            # Leads: the same leads as the other view (leads that came in during the dates, from leads_create).
+            # Appointments / orders: from the "date only" tab, every one set up in the dates, whenever the lead came in.
+            s_leads, _ = setter_data(tabs)
+            _, s_apts = setter_data({LEADS_TAB: tabs[date_only_ws], APT_TAB: tabs[date_only_ws]})
+            st.caption("Leads = leads that came in during the dates (same as the Setter leads view). "
+                       "Appointments = every appointment the setters set up during the dates (first_created), "
+                       "no matter when the lead came in; orders follow those appointments.")
+        else:
+            s_leads, s_apts = setter_data(tabs)
     except ValueError as err:
         st.error(str(err))
         s_leads = None
