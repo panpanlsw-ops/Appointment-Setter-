@@ -304,6 +304,8 @@ def setter_data(tabs):
     for c in extra:
         apts[c] = text(a[c])
     for df, src in ((apts, a), (leads, l)):
+        df["source"] = text(src[SOURCE_COL]) if SOURCE_COL in src.columns else ""
+        df["channel"] = text(src[CHANNEL_COL]) if CHANNEL_COL in src.columns else ""
         df["owner"] = clean_name(src[ALL_COLS["owner"]]) if ALL_COLS["owner"] in src.columns else ""
         df["office"] = clean_office(src[OFFICE_COL]) if OFFICE_COL in src.columns else ""
         amt_col = next((c_ for c_ in ORDER_AMOUNT_COLS if c_ in src.columns), None)
@@ -1029,7 +1031,8 @@ with tab_setters:
             ("Orders placed", f"{int(tot.Orders):,}", ORANGE),
         ])
 
-        # Where the setters' appointments came from: lead source (Web / Phone) and channel (Yelp / Home Depot)
+        # Where the leads came from: lead source (Web / Phone) and channel (Yelp / Home Depot),
+        # counted on the same leads as the "Leads created" card
         def lead_lookup(col):
             if ALL_TAB not in tabs or col not in tabs[ALL_TAB].columns:
                 return pd.Series(dtype=str)
@@ -1038,9 +1041,10 @@ with tab_setters:
             m_ = m_[m_.v != ""].drop_duplicates("lead")
             return m_.set_index("lead").v
         src_map, ch_map = lead_lookup(SOURCE_COL), lead_lookup(CHANNEL_COL)
-        apt_leads = active.drop_duplicates("lead").lead                      # all appointments, cancelled incl.
-        src = apt_leads.map(src_map).fillna("").str.lower()
-        chn = apt_leads.map(ch_map).fillna("").str.lower()
+        lead_rows = Ls.drop_duplicates("lead")
+        # value from the leads_create tab itself; if empty there, look it up in the all company tab
+        src = lead_rows.source.where(lead_rows.source != "", lead_rows.lead.map(src_map)).fillna("").str.lower()
+        chn = lead_rows.channel.where(lead_rows.channel != "", lead_rows.lead.map(ch_map)).fillna("").str.lower()
 
         def two_numbers(labels_values, note):
             cells = "".join(f"<span>{l}</span>" for l, _ in labels_values) + \
@@ -1052,11 +1056,11 @@ with tab_setters:
                                           ("Phone", int(src.isin(PHONE_SOURCES).sum()))],
                                          "Web = build_source Web · Phone = custom / Invoca")
         ch_html, ch_note = two_numbers([(c_, int((chn == c_.lower()).sum())) for c_ in CHANNELS],
-                                       "from the Channel column" if len(ch_map) else
-                                       "add a Channel column to the all company tab")
+                                       "from the Channel column" if (len(ch_map) or (lead_rows.channel != "").any())
+                                       else "add a Channel column to the sheet")
         kpi_strip([
-            ("Appointments by lead source", "", None, [src_html, src_note]),
-            ("Appointments by channel", "", None, [ch_html, ch_note]),
+            ("Leads by source", "", None, [src_html, src_note]),
+            ("Leads by channel", "", None, [ch_html, ch_note]),
         ])
 
         left, right = st.columns([2, 1], gap="medium")
