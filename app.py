@@ -99,6 +99,12 @@ REGION_OF_OFFICE = {
     "Bay Area": "NorCal", "Sacramento": "NorCal", "Fresno": "NorCal",
     "Austin": "Texas", "San Antonio": "Texas",
 }
+# Lead source / channel cards on the Setter performance tab (looked up in the all company tab by leads_id)
+SOURCE_COL, CHANNEL_COL = "build_source", "Channel"
+WEB_SOURCES = ["web"]                       # build_source values counted as Web leads (any case)
+PHONE_SOURCES = ["custom", "invoca"]        # build_source values counted as Phone leads
+CHANNELS = ["Yelp", "Home Depot"]           # Channel values shown on the card
+
 # Order amount shown in those lists: the first of these columns found in the sheet
 ORDER_AMOUNT_COLS = ["sales amount", "IS amount"]
 
@@ -1021,6 +1027,36 @@ with tab_setters:
             ("Appointments", f"{int(tot.Appointments):,}", BLUE),
             ("Cancelled", f"{int(tot.Cancelled):,}", "#AEB8C6"),
             ("Orders placed", f"{int(tot.Orders):,}", ORANGE),
+        ])
+
+        # Where the setters' appointments came from: lead source (Web / Phone) and channel (Yelp / Home Depot)
+        def lead_lookup(col):
+            if ALL_TAB not in tabs or col not in tabs[ALL_TAB].columns:
+                return pd.Series(dtype=str)
+            d_ = tabs[ALL_TAB]
+            m_ = pd.DataFrame({"lead": text(d_[ALL_COLS["lead"]]), "v": text(d_[col])})
+            m_ = m_[m_.v != ""].drop_duplicates("lead")
+            return m_.set_index("lead").v
+        src_map, ch_map = lead_lookup(SOURCE_COL), lead_lookup(CHANNEL_COL)
+        apt_leads = active.drop_duplicates("lead").lead                      # all appointments, cancelled incl.
+        src = apt_leads.map(src_map).fillna("").str.lower()
+        chn = apt_leads.map(ch_map).fillna("").str.lower()
+
+        def two_numbers(labels_values, note):
+            cells = "".join(f"<span>{l}</span>" for l, _ in labels_values) + \
+                    "".join(f"<b>{v:,}</b>" for _, v in labels_values)
+            return (f'<div class="brk" style="grid-template-columns: repeat({len(labels_values)}, auto); '
+                    f'column-gap: 40px">{cells}</div>'), note
+
+        src_html, src_note = two_numbers([("Web", int(src.isin(WEB_SOURCES).sum())),
+                                          ("Phone", int(src.isin(PHONE_SOURCES).sum()))],
+                                         "Web = build_source Web · Phone = custom / Invoca")
+        ch_html, ch_note = two_numbers([(c_, int((chn == c_.lower()).sum())) for c_ in CHANNELS],
+                                       "from the Channel column" if len(ch_map) else
+                                       "add a Channel column to the all company tab")
+        kpi_strip([
+            ("Appointments by lead source", "", None, [src_html, src_note]),
+            ("Appointments by channel", "", None, [ch_html, ch_note]),
         ])
 
         left, right = st.columns([2, 1], gap="medium")
