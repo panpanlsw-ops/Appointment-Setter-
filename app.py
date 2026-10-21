@@ -1282,11 +1282,21 @@ with tab_sales:
         R = R.assign(is_any_apt=R.is_apt | R.is_cancel,
                      is_setter_apt=(R.is_apt | R.is_cancel) & is_setter_branch(R.apt_branch))
 
-        # Benchmark row: leads the appointment setters department created, counted the same way
-        # Same rule as the Setter performance tab: leads the setters department CREATED,
-        # and appointments (plus their orders / installs) the setters department SET UP
-        setter_leads, setter_apts = is_setter_branch(R.branch), is_setter_branch(R.apt_branch)
-        setters = group_totals(setter_leads, setter_apts, setter_apts, setter_apts)
+        # Appointment setters benchmark = the "Setter leads" view of the Setter performance tab:
+        # leads from leads_create, appointments (cancelled included) and orders from apt_created,
+        # each in the dates picked here.
+        try:
+            sl_, sa_ = setter_data(tabs)
+            Lb, Ab = in_range(sl_, s, e, "date"), in_range(sa_, s, e, "date")
+            n_l, n_a = Lb.lead.nunique(), Ab.lead.nunique()
+            n_o = Ab[Ab.ordered].lead.nunique()
+            setters = pd.Series({"Leads": n_l, "Appointments": n_a,
+                                 "Cancelled": Ab[Ab.status == "Cancelled"].lead.nunique(), "Orders": n_o,
+                                 "Apt / Leads": n_a / n_l * 100 if n_l else np.nan,
+                                 "Order / Apt": n_o / n_a * 100 if n_a else np.nan,
+                                 "Order / Leads": n_o / n_l * 100 if n_l else np.nan}, dtype=float)
+        except ValueError:
+            setters = pd.Series({"Apt / Leads": np.nan, "Order / Apt": np.nan, "Order / Leads": np.nan})
 
         # Each rep's branch = their Regional Office (most common one on the leads they own)
         def mode_branch(df):
@@ -1356,9 +1366,9 @@ with tab_sales:
             <div><div class="v">{fmt_pct(company['Apt / Leads'])}</div><div class="l">{scope}</div></div>
             <div><div class="v blue">{fmt_pct(setters['Apt / Leads'])}</div><div class="l">Appointment setters</div></div>
           </div></div>
-          <div><h3>Order / Leads</h3><div class="row">
-            <div><div class="v">{fmt_pct(company['Order / Leads'])}</div><div class="l">{scope}</div></div>
-            <div><div class="v blue">{fmt_pct(setters['Order / Leads'])}</div><div class="l">Appointment setters</div></div>
+          <div><h3>Order / Apt</h3><div class="row">
+            <div><div class="v">{fmt_pct(company['Orders'] / company['Appointments'] * 100 if company['Appointments'] else np.nan)}</div><div class="l">{scope}</div></div>
+            <div><div class="v blue">{fmt_pct(setters['Order / Apt'])}</div><div class="l">Appointment setters</div></div>
           </div></div>
         </div>""", unsafe_allow_html=True)
 
