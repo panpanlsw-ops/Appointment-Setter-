@@ -711,7 +711,8 @@ if r2.button("Refresh now", width="stretch"):
     read_tabs.clear()
     st.rerun()
 
-tab_calls, tab_setters, tab_sales = st.tabs(["Phone calls", "Setter performance", "Sales vs setters"])
+tab_calls, tab_setters, tab_history, tab_sales = st.tabs(
+    ["Phone calls", "Daily performance", "History performance", "Sales vs setters"])
 
 # ---------------------------------------------------------------- TAB 1
 with tab_calls:
@@ -926,7 +927,6 @@ def render_daily():
             dly["day"] = dly.when.dt.normalize()
 
     if dly is not None and not dly.empty:
-        st.markdown("### Daily performance")
         lo, hi = dly.day.min().date(), dly.day.max().date()
         f1, f2 = st.columns([3, 2])
         with f1:
@@ -987,9 +987,9 @@ def render_daily():
 
 # ---------------------------------------------------------------- TAB 2
 with tab_setters:
-    with st.container(border=True):
-        render_daily()
-    st.markdown("### History performance")
+    render_daily()
+
+with tab_history:
     date_only_ws = next((n for n in tabs if n.strip().lower() == DATE_ONLY_TAB), None)
     hist_view = st.radio(
         "View", ["Setter leads", "Everything in the date range"], horizontal=True, key="hist_view",
@@ -1091,51 +1091,60 @@ with tab_setters:
         PIE_COLORS = {"Web": BLUE, "Phone": ORANGE, "Yelp": "#C8102E", "Home Depot": "#F28C28",
                       "Other": "#D5DBE3"}
 
-        def pie(counts, title):
-            """Small donut with a compact legend on its right."""
+        def donut(counts, subtitle):
+            """Medium donut with its subtitle above and a one-line legend underneath."""
             d_ = counts[counts > 0].rename("n").reset_index().rename(columns={"index": "part"})
             total = int(d_.n.sum())
-            st.markdown(f'<div class="dash" style="font-size:14px;color:{MUTED};margin-bottom:4px">{title}</div>',
+            st.markdown(f'<div class="dash" style="text-align:center;font-size:13px;font-weight:600;'
+                        f'color:{MUTED};text-transform:uppercase;letter-spacing:.04em">{subtitle}</div>',
                         unsafe_allow_html=True)
             if not total:
                 st.caption("Nothing in this range.")
                 return
             d_["pct"] = d_.n / total * 100
-            g1, g2 = st.columns([1, 1.25], gap="small", vertical_alignment="center")
-            with g1:
-                donut = alt.Chart(d_).mark_arc(innerRadius=34, outerRadius=56, stroke="#fff").encode(
-                    theta=alt.Theta("n:Q", stack=True),
-                    color=alt.Color("part:N", legend=None,
-                                    scale=alt.Scale(domain=list(d_.part),
-                                                    range=[PIE_COLORS.get(p_, MUTED) for p_ in d_.part])),
-                    tooltip=[alt.Tooltip("part:N", title=""), alt.Tooltip("n:Q", title="Count", format=","),
-                             alt.Tooltip("pct:Q", title="%", format=".1f")])
-                center = alt.Chart(pd.DataFrame({"t": [f"{total:,}"]})).mark_text(
-                    fontSize=14, fontWeight="bold", color=INK).encode(text="t:N")
-                st.altair_chart((donut + center).properties(width=130, height=130)
-                                .configure_view(stroke=None), width="content")
-            with g2:
-                st.markdown("".join(
-                    f'<div class="dash" style="display:flex;align-items:center;gap:6px;font-size:13px;'
-                    f'line-height:1.9;color:{INK}"><span style="width:9px;height:9px;border-radius:50%;'
-                    f'background:{PIE_COLORS.get(r.part, MUTED)};display:inline-block"></span>'
-                    f'<span style="color:{MUTED}">{r.part}</span>'
-                    f'<b style="margin-left:auto">{int(r.n):,}</b>'
-                    f'<span style="color:{MUTED};width:44px;text-align:right">{r.pct:.0f}%</span></div>'
-                    for r in d_.itertuples()), unsafe_allow_html=True)
+            chart = alt.Chart(d_).mark_arc(innerRadius=48, outerRadius=74, stroke="#fff", strokeWidth=2).encode(
+                theta=alt.Theta("n:Q", stack=True),
+                color=alt.Color("part:N", legend=None,
+                                scale=alt.Scale(domain=list(d_.part),
+                                                range=[PIE_COLORS.get(p_, MUTED) for p_ in d_.part])),
+                tooltip=[alt.Tooltip("part:N", title=""), alt.Tooltip("n:Q", title="Count", format=","),
+                         alt.Tooltip("pct:Q", title="%", format=".1f")])
+            # biggest named slice in the middle (e.g. "27% Web"), so the key number is readable at a glance
+            named = d_[d_.part != "Other"]
+            top = named.sort_values("n", ascending=False).iloc[0] if len(named) else d_.iloc[0]
+            mid = alt.Chart(pd.DataFrame({"t": [f"{top.pct:.0f}%"], "s": [str(top.part)]}))
+            center = (mid.mark_text(fontSize=20, fontWeight="bold", color=INK, dy=-7).encode(text="t:N")
+                      + mid.mark_text(fontSize=11, color=MUTED, dy=12).encode(text="s:N"))
+            st.altair_chart((chart + center).properties(width=170, height=170).configure_view(stroke=None),
+                            width="stretch")
+            st.markdown('<div class="dash" style="display:flex;flex-wrap:wrap;justify-content:center;'
+                        'gap:4px 16px;font-size:13px">' + "".join(
+                f'<span style="white-space:nowrap"><span style="display:inline-block;width:9px;height:9px;'
+                f'border-radius:50%;background:{PIE_COLORS.get(r.part, MUTED)};margin-right:5px"></span>'
+                f'<span style="color:{MUTED}">{r.part}</span> <b style="color:{INK}">{int(r.n):,}</b>'
+                f'<span style="color:{MUTED}"> · {r.pct:.0f}%</span></span>' for r in d_.itertuples())
+                + "</div>", unsafe_allow_html=True)
 
-        with st.container(border=True):
-            p1, p2, p3, p4 = st.columns(4, gap="large")
-            with p1:
-                pie(by_source(src), "Leads by source")
-            with p2:
-                pie(by_channel(chn), "Leads by channel")
-            with p3:
-                pie(by_source(a_src), "Appointments by source")
-            with p4:
-                pie(by_channel(a_chn), "Appointments by channel")
-            st.caption("Web = build_source Web · Phone = custom / Invoca · Channel from the Channel column · "
-                       "appointments include cancelled ones · the number in the middle is the total.")
+        def panel(title, total, unit, src_counts, ch_counts):
+            with st.container(border=True):
+                st.markdown(f'<div class="dash" style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px">'
+                            f'<span style="font-size:17px;font-weight:700;color:{INK}">{title}</span>'
+                            f'<span style="font-size:14px;color:{MUTED}">{total:,} {unit}</span></div>',
+                            unsafe_allow_html=True)
+                c1, c2 = st.columns(2, gap="medium")
+                with c1:
+                    donut(src_counts, "By source")
+                with c2:
+                    donut(ch_counts, "By channel")
+
+        left, right = st.columns(2, gap="medium")
+        with left:
+            panel("Leads created", int(len(src)), "leads", by_source(src), by_channel(chn))
+        with right:
+            panel("Appointments", int(len(a_src)), "appointments", by_source(a_src), by_channel(a_chn))
+        st.caption("Web = build_source Web · Phone = custom / Invoca · Channel from the Channel column · "
+                   "appointments include cancelled ones · each lead counted once. "
+                   "The middle of each chart shows the biggest named part.")
 
         left, right = st.columns([2, 1], gap="medium")
         with left:
