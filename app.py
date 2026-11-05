@@ -1061,27 +1061,69 @@ with tab_setters:
             m_ = m_[m_.v != ""].drop_duplicates("lead")
             return m_.set_index("lead").v
         src_map, ch_map = lead_lookup(SOURCE_COL), lead_lookup(CHANNEL_COL)
-        lead_rows = Ls.drop_duplicates("lead")
+        def per_lead(rows, col, lookup, priority):
+            """One value per lead. A lead can have several rows (it came in more than once), so it gets the
+            first value in `priority` found on ANY of its rows (e.g. Web if any row is Web)."""
+            v = rows[col].where(rows[col] != "", rows.lead.map(lookup)) if col in rows else rows.lead.map(lookup)
+            v = v.fillna("").str.lower()
+            rank = {p_: i for i, p_ in enumerate(priority)}
+            best = (pd.DataFrame({"lead": rows.lead, "v": v, "r": v.map(rank).fillna(len(priority))})
+                    .sort_values("r").drop_duplicates("lead"))
+            return best.v
+        SRC_PRIORITY = WEB_SOURCES + PHONE_SOURCES
+        CH_PRIORITY = [c_.lower() for c_ in CHANNELS]
         # value from the leads_create tab itself; if empty there, look it up in the all company tab
-        src = lead_rows.source.where(lead_rows.source != "", lead_rows.lead.map(src_map)).fillna("").str.lower()
-        chn = lead_rows.channel.where(lead_rows.channel != "", lead_rows.lead.map(ch_map)).fillna("").str.lower()
+        src = per_lead(Ls, "source", src_map, SRC_PRIORITY)
+        chn = per_lead(Ls, "channel", ch_map, CH_PRIORITY)
 
-        def two_numbers(labels_values, note):
-            cells = "".join(f"<span>{l}</span>" for l, _ in labels_values) + \
-                    "".join(f"<b>{v:,}</b>" for _, v in labels_values)
-            return (f'<div class="brk" style="grid-template-columns: repeat({len(labels_values)}, auto); '
-                    f'column-gap: 40px">{cells}</div>'), note
+        # Same lookups for the appointments (all of them, cancelled included)
+        a_src = per_lead(active, "source", src_map, SRC_PRIORITY)
+        a_chn = per_lead(active, "channel", ch_map, CH_PRIORITY)
 
-        src_html, src_note = two_numbers([("Web", int(src.isin(WEB_SOURCES).sum())),
-                                          ("Phone", int(src.isin(PHONE_SOURCES).sum()))],
-                                         "Web = build_source Web · Phone = custom / Invoca")
-        ch_html, ch_note = two_numbers([(c_, int((chn == c_.lower()).sum())) for c_ in CHANNELS],
-                                       "from the Channel column" if (len(ch_map) or (lead_rows.channel != "").any())
-                                       else "add a Channel column to the sheet")
-        kpi_strip([
-            ("Leads by source", "", None, [src_html, src_note]),
-            ("Leads by channel", "", None, [ch_html, ch_note]),
-        ])
+        def by_source(sv):
+            return pd.Series({"Web": int(sv.isin(WEB_SOURCES).sum()), "Phone": int(sv.isin(PHONE_SOURCES).sum()),
+                              "Other / unknown": int((~sv.isin(WEB_SOURCES + PHONE_SOURCES)).sum())})
+
+        def by_channel(cv):
+            known = {c_: int((cv == c_.lower()).sum()) for c_ in CHANNELS}
+            return pd.Series({**known, "Other channels": int(len(cv) - sum(known.values()))})
+
+        PIE_COLORS = {"Web": BLUE, "Phone": ORANGE, "Yelp": "#C8102E", "Home Depot": "#F28C28",
+                      "Other / unknown": "#D5DBE3", "Other channels": "#D5DBE3"}
+
+        def pie(counts, title):
+            d_ = counts[counts > 0].rename("n").reset_index().rename(columns={"index": "part"})
+            d_["pct"] = d_.n / d_.n.sum() * 100 if d_.n.sum() else 0
+            d_["label"] = d_.apply(lambda r: f"{r.part}: {r.n:,} ({r.pct:.1f}%)", axis=1)
+            with st.container(border=True):
+                st.markdown(f"##### {title}")
+                if d_.empty:
+                    st.caption("Nothing in this range.")
+                    return
+                base = alt.Chart(d_).encode(
+                    theta=alt.Theta("n:Q", stack=True),
+                    color=alt.Color("label:N", title=None, sort=list(d_.label),
+                                    scale=alt.Scale(domain=list(d_.label),
+                                                    range=[PIE_COLORS.get(p_, MUTED) for p_ in d_.part]),
+                                    legend=alt.Legend(orient="bottom", direction="vertical", labelLimit=260)),
+                    tooltip=[alt.Tooltip("part:N", title=""), alt.Tooltip("n:Q", title="Count", format=","),
+                             alt.Tooltip("pct:Q", title="%", format=".1f")])
+                donut = base.mark_arc(innerRadius=55, outerRadius=95, stroke="#fff")
+                center = alt.Chart(pd.DataFrame({"t": [f"{int(d_.n.sum()):,}"]})).mark_text(
+                    fontSize=22, fontWeight="bold", color=INK).encode(text="t:N")
+                st.altair_chart((donut + center).properties(height=300), width="stretch")
+
+        p1, p2, p3, p4 = st.columns(4, gap="small")
+        with p1:
+            pie(by_source(src), "Leads by source")
+        with p2:
+            pie(by_channel(chn), "Leads by channel")
+        with p3:
+            pie(by_source(a_src), "Appointments by source")
+        with p4:
+            pie(by_channel(a_chn), "Appointments by channel")
+        st.caption("Web = build_source Web · Phone = custom / Invoca. Channel from the Channel column. "
+                   "Appointments include cancelled ones. The number in the middle is the total.")
 
         left, right = st.columns([2, 1], gap="medium")
         with left:
