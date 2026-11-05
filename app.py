@@ -1363,6 +1363,13 @@ with tab_sales:
         # Cards + "All listed branches" row: every lead whose Regional Office is in the Branches list
         in_scope = in_pick
         company = metrics(R[in_scope])
+        # Field reps' own rates: leave out every lead whose appointment the appointment setters set up
+        # (both the lead and its appointment / order), so only the field reps' own work is compared.
+        setter_set_leads = set(R.loc[is_setter_branch(R.apt_branch) & (R.is_apt | R.is_cancel), "lead"])
+        field_rows = R[in_scope & ~R.lead.isin(setter_set_leads)]
+        field = metrics(field_rows)
+        # Order / Apt only counts orders that came from an appointment in the dates
+        field["Orders from apts"] = field_rows[field_rows.is_order & (field_rows.is_apt | field_rows.is_cancel)].lead.nunique()
         # sales reps = leads owners, except people in the appointment setters department
         names = {n for n in set(R.owner) - {""} if rep_branch.get(n, "").lower() != SETTER_BRANCH.lower()}
         # A rep is a NAME + REGIONAL OFFICE: two people with the same name in different offices are
@@ -1412,14 +1419,19 @@ with tab_sales:
         st.markdown(f"""
         <div class="dash cmp">
           <div><h3>Apt / Leads</h3><div class="row">
-            <div><div class="v">{fmt_pct(company['Apt / Leads'])}</div><div class="l">{scope}</div></div>
+            <div><div class="v">{fmt_pct(field['Apt / Leads'])}</div><div class="l">{scope}</div></div>
             <div><div class="v blue">{fmt_pct(setters['Apt / Leads'])}</div><div class="l">Appointment setters</div></div>
           </div></div>
           <div><h3>Order / Apt</h3><div class="row">
-            <div><div class="v">{fmt_pct(company['Orders'] / company['Appointments'] * 100 if company['Appointments'] else np.nan)}</div><div class="l">{scope}</div></div>
+            <div><div class="v">{fmt_pct(field['Orders from apts'] / field['Appointments'] * 100 if field['Appointments'] else np.nan)}</div><div class="l">{scope}</div></div>
             <div><div class="v blue">{fmt_pct(setters['Order / Apt'])}</div><div class="l">Appointment setters</div></div>
           </div></div>
         </div>""", unsafe_allow_html=True)
+        st.caption(f"{scope}: leads whose appointment the appointment setters set up are left out of both rates "
+                   f"({int(field['Leads']):,} leads, {int(field['Appointments']):,} appointments, "
+                   f"{int(field['Orders from apts']):,} orders from those appointments). Order / Apt only counts "
+                   f"orders that came from an appointment. Appointment setters: leads they created, "
+                   f"appointments they set up.")
 
         with st.container(border=True):
             st.markdown("#### By sales rep")
@@ -1441,6 +1453,7 @@ with tab_sales:
                         "Set up (active)": sub[sub.is_apt].lead.nunique(),
                         "Cancelled": sub[sub.is_cancel].lead.nunique(),
                         "Orders": sub[sub.is_order].lead.nunique(),
+                        "_orders_apt": sub[sub.is_order & sub.is_any_apt].lead.nunique(),
                         "Installs": n_inst, "Installed $": amt}
 
             rows, meta = [], []
@@ -1454,7 +1467,7 @@ with tab_sales:
                     rows.append({"Branch": branch if k == 0 else "", "Sales rep": who if k == 0 else "",
                                  "Set by": label, "Leads": n_leads if k == 0 else np.nan, **c_,
                                  "Apt / Leads": c_["All appointments"] / n_leads * 100 if n_leads else np.nan,
-                                 "Order / Apt": (c_["Orders"] / c_["All appointments"] * 100
+                                 "Order / Apt": (c_["_orders_apt"] / c_["All appointments"] * 100
                                                  if c_["All appointments"] else np.nan)})
                     meta.append((who, label))
             two = pd.DataFrame(rows)
@@ -1474,7 +1487,7 @@ with tab_sales:
                 return [css] * len(row)
 
             # Show numbers as text so empty cells stay empty (no "None")
-            disp = two.copy()
+            disp = two.drop(columns=["_orders_apt"]).copy()
             num = lambda v: "" if pd.isna(v) else f"{int(v):,}"
             for c_ in ["Leads", "All appointments", "Set up (active)", "Cancelled", "Orders", "Installs"]:
                 disp[c_] = disp[c_].map(num)
