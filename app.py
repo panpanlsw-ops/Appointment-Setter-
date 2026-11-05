@@ -108,6 +108,11 @@ WEB_SOURCES = ["web"]                       # build_source values counted as Web
 PHONE_SOURCES = ["custom", "invoca"]        # build_source values counted as Phone leads
 CHANNELS = ["Yelp", "Home Depot"]           # Channel values shown on the card
 
+# Home Depot section on the History performance tab
+HD_CHANNEL = "Home Depot"
+HD_EXTRA_CREATORS = ["Nora Avanesian"]          # counted besides the appointment setters department
+SALES_AMOUNT_COLS = ["sales amount", "sales_amount", "order amount"]   # order $ (first one found)
+
 # Order amount shown in those lists: the first of these columns found in the sheet
 ORDER_AMOUNT_COLS = ["sales amount", "IS amount"]
 
@@ -1253,6 +1258,95 @@ with tab_history:
                 tooltip=[alt.Tooltip("yearmonth(month):O", title="Month", format="%b %Y"), "count"])
             labels = bars.mark_text(dy=-8, fontSize=11, color=MUTED).encode(text="count:Q")
             st.altair_chart((bars + labels).properties(height=260), width="stretch")
+
+        # ------------------------------------------------------------ Home Depot leads
+        st.markdown("### Home Depot leads")
+        hd_src = tabs.get(ALL_TAB)
+        if hd_src is None or CHANNEL_COL not in hd_src.columns:
+            st.info(f'Add a "{CHANNEL_COL}" column to the "{ALL_TAB}" tab to see Home Depot leads.')
+        else:
+            c = resolve_cols(hd_src, ALL_COLS)
+            st_ = text(hd_src[c["status"]])
+            sales_col = next((x for x in SALES_AMOUNT_COLS if x in hd_src.columns), None)
+            num = lambda col: pd.to_numeric(text(hd_src[col]).str.replace(r"[$,]", "", regex=True), errors="coerce")
+            H = pd.DataFrame({
+                "lead": text(hd_src[c["lead"]]),
+                "date": to_dt(hd_src[c["lead_date"]]),
+                "creator": clean_name(hd_src[c["lead_by"]]),
+                "creator_branch": text(hd_src[c["lead_branch"]]),
+                "channel": text(hd_src[CHANNEL_COL]).str.lower(),
+                "apt_by": clean_name(hd_src[c["apt_by"]]),
+                "apt_date": to_dt(hd_src[c["apt_date"]]),
+                "has_apt": (text(hd_src[c["apt_by"]]) != "") | (st_ != ""),
+                "cancelled": st_.str.lower().isin(CANCELLED_VALUES),
+                "ordered": text(hd_src[c["order"]]) != "",
+                "sales": num(sales_col) if sales_col else np.nan,
+                "installed": num(INSTALL_COLS["amount"]) if INSTALL_COLS["amount"] in hd_src.columns else np.nan,
+                "owner": clean_name(hd_src[ALL_COLS["owner"]]) if ALL_COLS["owner"] in hd_src.columns else "",
+            })
+            extra = [x.lower() for x in HD_EXTRA_CREATORS]
+            H = H[(H.channel == HD_CHANNEL.lower())
+                  & ((H.creator_branch.str.lower() == SETTER_BRANCH.lower()) | H.creator.str.lower().isin(extra))]
+            H = in_range(H.dropna(subset=["date"]), s, e, "date")
+            # one row per lead: it has an appointment / order if any of its rows does
+            per = (H.groupby("lead")
+                   .agg(date=("date", "min"), creator=("creator", "first"), apt_by=("apt_by", "max"),
+                        apt_date=("apt_date", "min"), has_apt=("has_apt", "any"), cancelled=("cancelled", "any"),
+                        ordered=("ordered", "any"), sales=("sales", "max"), installed=("installed", "max"),
+                        owner=("owner", "first"))
+                   .reset_index())
+            n_leads, n_apt = len(per), int(per.has_apt.sum())
+            n_canc, n_ord = int((per.has_apt & per.cancelled).sum()), int(per.ordered.sum())
+            n_inst = int(per.installed.notna().sum())
+            sales_sum, inst_sum = per.sales.sum(min_count=1), per.installed.sum(min_count=1)
+            money = lambda v: "–" if pd.isna(v) else (f"${v / 1e6:,.2f}M" if v >= 1e6 else f"${v:,.0f}")
+            kpi_strip([
+                ("Leads received", f"{n_leads:,}", INK,
+                 [f"by the setters + {', '.join(HD_EXTRA_CREATORS)}"]),
+                ("Appointments", f"{n_apt:,}", BLUE,
+                 [f"<b>{fmt_pct(n_apt / n_leads * 100 if n_leads else np.nan)}</b> of leads",
+                  f"{n_canc:,} cancelled"]),
+                ("Orders", f"{n_ord:,}", ORANGE,
+                 [f"<b>{fmt_pct(n_ord / n_apt * 100 if n_apt else np.nan)}</b> of appointments"]),
+                ("Sales $", money(sales_sum), ORANGE,
+                 ["order amounts" if sales_col else "add a “sales amount” column"]),
+                ("Installs", f"{n_inst:,}", "#2E8B57", []),
+                ("Installed $", money(inst_sum), "#2E8B57", [f"from {INSTALL_COLS['amount']}"]),
+            ])
+            st.caption(f"Leads with {CHANNEL_COL} = {HD_CHANNEL} that came in during the dates above "
+                       f"(by {ALL_COLS['lead_date']}), created by the appointment setters department or "
+                       f"{', '.join(HD_EXTRA_CREATORS)}. Appointments, orders and $ are for those leads, "
+                       f"each lead counted once.")
+            if n_leads:
+                left_, right_ = st.columns([5, 6], gap="medium")
+                with left_:
+                    with st.container(border=True):
+                        st.markdown("#### By who created the lead")
+                        bc = per.groupby("creator").agg(
+                            Leads=("lead", "size"), Appointments=("has_apt", "sum"), Orders=("ordered", "sum"),
+                            **{"Sales $": ("sales", "sum"), "Installed $": ("installed", "sum")})
+                        bc = bc.sort_values("Leads", ascending=False)
+                        bc.index.name = "Created by"
+                        st.dataframe(bc.style.format({"Sales $": "${:,.0f}", "Installed $": "${:,.0f}"}),
+                                     height=36 * (len(bc) + 1) + 4)
+                with right_:
+                    with st.container(border=True):
+                        st.markdown(f"#### Home Depot leads ({n_leads:,})")
+                        lst = per.sort_values("date", ascending=False)
+                        show_hd = pd.DataFrame({
+                            "Lead": (lst.lead.map(lambda i: CRM_LEAD_URL.format(lead=i)) if CRM_LEAD_URL else lst.lead),
+                            "Came in": lst.date.dt.strftime("%m/%d/%Y"),
+                            "Created by": lst.creator,
+                            "Appointment": np.where(~lst.has_apt, "", np.where(lst.cancelled, "Cancelled", "Set up")),
+                            "Set by": lst.apt_by,
+                            "Sales rep": lst.owner,
+                            "Sales $": lst.sales.map(lambda v: "" if pd.isna(v) else f"${v:,.0f}"),
+                            "Installed $": lst.installed.map(lambda v: "" if pd.isna(v) else f"${v:,.0f}"),
+                        })
+                        cfg = ({"Lead": st.column_config.LinkColumn("Lead", display_text=r"leads_id=(\d+)")}
+                               if CRM_LEAD_URL else {})
+                        st.dataframe(show_hd, hide_index=True, column_config=cfg,
+                                     height=min(36 * (len(show_hd) + 1) + 4, 380))
 
 
 # ---------------------------------------------------------------- TAB 3
