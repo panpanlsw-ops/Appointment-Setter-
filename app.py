@@ -1082,48 +1082,60 @@ with tab_setters:
 
         def by_source(sv):
             return pd.Series({"Web": int(sv.isin(WEB_SOURCES).sum()), "Phone": int(sv.isin(PHONE_SOURCES).sum()),
-                              "Other / unknown": int((~sv.isin(WEB_SOURCES + PHONE_SOURCES)).sum())})
+                              "Other": int((~sv.isin(WEB_SOURCES + PHONE_SOURCES)).sum())})
 
         def by_channel(cv):
             known = {c_: int((cv == c_.lower()).sum()) for c_ in CHANNELS}
-            return pd.Series({**known, "Other channels": int(len(cv) - sum(known.values()))})
+            return pd.Series({**known, "Other": int(len(cv) - sum(known.values()))})
 
         PIE_COLORS = {"Web": BLUE, "Phone": ORANGE, "Yelp": "#C8102E", "Home Depot": "#F28C28",
-                      "Other / unknown": "#D5DBE3", "Other channels": "#D5DBE3"}
+                      "Other": "#D5DBE3"}
 
         def pie(counts, title):
+            """Small donut with a compact legend on its right."""
             d_ = counts[counts > 0].rename("n").reset_index().rename(columns={"index": "part"})
-            d_["pct"] = d_.n / d_.n.sum() * 100 if d_.n.sum() else 0
-            d_["label"] = d_.apply(lambda r: f"{r.part}: {r.n:,} ({r.pct:.1f}%)", axis=1)
-            with st.container(border=True):
-                st.markdown(f"##### {title}")
-                if d_.empty:
-                    st.caption("Nothing in this range.")
-                    return
-                base = alt.Chart(d_).encode(
+            total = int(d_.n.sum())
+            st.markdown(f'<div class="dash" style="font-size:14px;color:{MUTED};margin-bottom:4px">{title}</div>',
+                        unsafe_allow_html=True)
+            if not total:
+                st.caption("Nothing in this range.")
+                return
+            d_["pct"] = d_.n / total * 100
+            g1, g2 = st.columns([1, 1.25], gap="small", vertical_alignment="center")
+            with g1:
+                donut = alt.Chart(d_).mark_arc(innerRadius=34, outerRadius=56, stroke="#fff").encode(
                     theta=alt.Theta("n:Q", stack=True),
-                    color=alt.Color("label:N", title=None, sort=list(d_.label),
-                                    scale=alt.Scale(domain=list(d_.label),
-                                                    range=[PIE_COLORS.get(p_, MUTED) for p_ in d_.part]),
-                                    legend=alt.Legend(orient="bottom", direction="vertical", labelLimit=260)),
+                    color=alt.Color("part:N", legend=None,
+                                    scale=alt.Scale(domain=list(d_.part),
+                                                    range=[PIE_COLORS.get(p_, MUTED) for p_ in d_.part])),
                     tooltip=[alt.Tooltip("part:N", title=""), alt.Tooltip("n:Q", title="Count", format=","),
                              alt.Tooltip("pct:Q", title="%", format=".1f")])
-                donut = base.mark_arc(innerRadius=55, outerRadius=95, stroke="#fff")
-                center = alt.Chart(pd.DataFrame({"t": [f"{int(d_.n.sum()):,}"]})).mark_text(
-                    fontSize=22, fontWeight="bold", color=INK).encode(text="t:N")
-                st.altair_chart((donut + center).properties(height=300), width="stretch")
+                center = alt.Chart(pd.DataFrame({"t": [f"{total:,}"]})).mark_text(
+                    fontSize=14, fontWeight="bold", color=INK).encode(text="t:N")
+                st.altair_chart((donut + center).properties(width=130, height=130)
+                                .configure_view(stroke=None), width="content")
+            with g2:
+                st.markdown("".join(
+                    f'<div class="dash" style="display:flex;align-items:center;gap:6px;font-size:13px;'
+                    f'line-height:1.9;color:{INK}"><span style="width:9px;height:9px;border-radius:50%;'
+                    f'background:{PIE_COLORS.get(r.part, MUTED)};display:inline-block"></span>'
+                    f'<span style="color:{MUTED}">{r.part}</span>'
+                    f'<b style="margin-left:auto">{int(r.n):,}</b>'
+                    f'<span style="color:{MUTED};width:44px;text-align:right">{r.pct:.0f}%</span></div>'
+                    for r in d_.itertuples()), unsafe_allow_html=True)
 
-        p1, p2, p3, p4 = st.columns(4, gap="small")
-        with p1:
-            pie(by_source(src), "Leads by source")
-        with p2:
-            pie(by_channel(chn), "Leads by channel")
-        with p3:
-            pie(by_source(a_src), "Appointments by source")
-        with p4:
-            pie(by_channel(a_chn), "Appointments by channel")
-        st.caption("Web = build_source Web · Phone = custom / Invoca. Channel from the Channel column. "
-                   "Appointments include cancelled ones. The number in the middle is the total.")
+        with st.container(border=True):
+            p1, p2, p3, p4 = st.columns(4, gap="large")
+            with p1:
+                pie(by_source(src), "Leads by source")
+            with p2:
+                pie(by_channel(chn), "Leads by channel")
+            with p3:
+                pie(by_source(a_src), "Appointments by source")
+            with p4:
+                pie(by_channel(a_chn), "Appointments by channel")
+            st.caption("Web = build_source Web · Phone = custom / Invoca · Channel from the Channel column · "
+                       "appointments include cancelled ones · the number in the middle is the total.")
 
         left, right = st.columns([2, 1], gap="medium")
         with left:
@@ -1440,8 +1452,9 @@ with tab_sales:
                        f"plus orders on leads without an appointment. Set by setters = appointments the appointment "
                        f"setters department set up. Orders, installs and Installed $ follow the appointment's row. "
                        f"Share of appts = this row's appointments ÷ the rep's total appointments (both rows). "
-                       f"Apt / Leads = all appointments (cancelled included) ÷ the rep's leads; "
-                       f"Order / Apt = orders ÷ all appointments. Sorted by leads.")
+                       f"Apt / Leads (Set by sales row) = the rep's own appointments ÷ the rep's leads, leaving out "
+                       f"leads the appointment setters booked (same rule as the Field reps box above). "
+                       f"Order / Apt = orders from those appointments ÷ appointments. Sorted by leads.")
             setter_row = is_setter_branch(R.apt_branch)
             SETBY = {"Set by sales": ~setter_row, "Set by setters": setter_row}
 
@@ -1461,12 +1474,17 @@ with tab_sales:
             for who in ["All sales reps"] + order:          # totals first, then each rep
                 base = own if who == "All sales reps" else own & (R.rep == who)
                 n_leads = R[base & R.is_lead].lead.nunique()
+                # Same rule as the Field reps box: the rep's own Apt / Leads leaves out the leads
+                # whose appointment the appointment setters set up
+                n_own_leads = R[base & R.is_lead & ~R.lead.isin(setter_set_leads)].lead.nunique()
                 branch = "" if who == "All sales reps" else t.loc[who, "Branch"]
                 for k, (label, cond) in enumerate(SETBY.items()):
                     c_ = split_counts(base & cond)
+                    own_rate = (c_["All appointments"] / n_own_leads * 100 if n_own_leads else np.nan)
                     rows.append({"Branch": branch if k == 0 else "", "Sales rep": who if k == 0 else "",
                                  "Set by": label, "Leads": n_leads if k == 0 else np.nan, **c_,
-                                 "Apt / Leads": c_["All appointments"] / n_leads * 100 if n_leads else np.nan,
+                                 # setters' row: no Apt / Leads here (their rate uses the leads they created)
+                                 "Apt / Leads": own_rate if label == "Set by sales" else np.nan,
                                  "Order / Apt": (c_["_orders_apt"] / c_["All appointments"] * 100
                                                  if c_["All appointments"] else np.nan)})
                     meta.append((who, label))
