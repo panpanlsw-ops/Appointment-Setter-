@@ -1259,7 +1259,14 @@ with tab_sales:
         with f2:
             pick = checklist_filter("Branches", branch_options, key="brx")
         all_picked = set(pick) == set(branch_options)
-        scope = "All listed branches" if all_picked else "Selected branches"
+        # Label for the field reps' numbers: all branches -> "Field reps"; one branch -> its name;
+        # a few -> their names; many -> "N branches"
+        if all_picked or not pick:
+            scope = "Field reps"
+        elif len(pick) <= 3:
+            scope = ", ".join(pick)
+        else:
+            scope = f"{len(pick)} branches"
 
         R = c_rows
         start, end = pd.Timestamp(s), pd.Timestamp(e) + pd.Timedelta(days=1)
