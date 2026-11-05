@@ -1308,14 +1308,12 @@ with tab_history:
                   f"{n_canc:,} cancelled"]),
                 ("Orders", f"{n_ord:,}", ORANGE,
                  [f"<b>{fmt_pct(n_ord / n_apt * 100 if n_apt else np.nan)}</b> of appointments"]),
-                ("Sales $", money(sales_sum), ORANGE,
-                 ["order amounts" if sales_col else "add a “sales amount” column"]),
-                ("Installs", f"{n_inst:,}", "#2E8B57", []),
-                ("Installed $", money(inst_sum), "#2E8B57", [f"from {INSTALL_COLS['amount']}"]),
+                ("Installs", f"{n_inst:,}", "#2E8B57", ["systems installed"]),
+                ("Installed $ sales", money(inst_sum), "#2E8B57", [f"from {INSTALL_COLS['amount']}"]),
             ])
             st.caption(f"Leads with {CHANNEL_COL} = {HD_CHANNEL} that came in during the dates above "
                        f"(by {ALL_COLS['lead_date']}), created by the appointment setters department or "
-                       f"{', '.join(HD_EXTRA_CREATORS)}. Appointments, orders and $ are for those leads, "
+                       f"{', '.join(HD_EXTRA_CREATORS)}. Appointments, orders, installs and installed $ sales are for those leads, "
                        f"each lead counted once.")
             if n_leads:
                 left_, right_ = st.columns([5, 6], gap="medium")
@@ -1324,10 +1322,10 @@ with tab_history:
                         st.markdown("#### By who created the lead")
                         bc = per.groupby("creator").agg(
                             Leads=("lead", "size"), Appointments=("has_apt", "sum"), Orders=("ordered", "sum"),
-                            **{"Sales $": ("sales", "sum"), "Installed $": ("installed", "sum")})
+                            Installs=("installed", "count"), **{"Installed $ sales": ("installed", "sum")})
                         bc = bc.sort_values("Leads", ascending=False)
                         bc.index.name = "Created by"
-                        st.dataframe(bc.style.format({"Sales $": "${:,.0f}", "Installed $": "${:,.0f}"}),
+                        st.dataframe(bc.style.format({"Installed $ sales": "${:,.0f}"}),
                                      height=36 * (len(bc) + 1) + 4)
                 with right_:
                     with st.container(border=True):
@@ -1340,8 +1338,8 @@ with tab_history:
                             "Appointment": np.where(~lst.has_apt, "", np.where(lst.cancelled, "Cancelled", "Set up")),
                             "Set by": lst.apt_by,
                             "Sales rep": lst.owner,
-                            "Sales $": lst.sales.map(lambda v: "" if pd.isna(v) else f"${v:,.0f}"),
-                            "Installed $": lst.installed.map(lambda v: "" if pd.isna(v) else f"${v:,.0f}"),
+                            "Ordered": np.where(lst.ordered, "Yes", ""),
+                            "Installed $ sales": lst.installed.map(lambda v: "" if pd.isna(v) else f"${v:,.0f}"),
                         })
                         cfg = ({"Lead": st.column_config.LinkColumn("Lead", display_text=r"leads_id=(\d+)")}
                                if CRM_LEAD_URL else {})
