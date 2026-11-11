@@ -4,3 +4,4 @@ numpy
 altair>=5
 gspread>=6
 google-auth
+openpyxl

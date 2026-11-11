@@ -585,6 +585,40 @@ def date_picker(key, default_start, default_end, lo, hi, quick="All dates"):
     return s, e
 
 
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def to_xlsx(df, sheet="Report", bold_rows_col=None):
+    """Excel file where every cell holding a URL is a clickable hyperlink (blue, underlined)."""
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    wb = Workbook(); ws = wb.active; ws.title = sheet[:31]
+    ws.append(list(df.columns))
+    for c in ws[1]:
+        c.font = Font(name="Arial", bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="0E7A3C")
+        c.alignment = Alignment(vertical="center")
+    for row in df.itertuples(index=False):
+        ws.append([None if (isinstance(v, float) and pd.isna(v)) else v for v in row])
+        r = ws.max_row
+        bold = bold_rows_col is not None and str(getattr(row, bold_rows_col, "")).lower().endswith("total")
+        for c in ws[r]:
+            c.font = Font(name="Arial", bold=bold)
+            if isinstance(c.value, str) and c.value.startswith(("http://", "https://")):
+                c.hyperlink = c.value
+                c.font = Font(name="Arial", color="0563C1", underline="single", bold=bold)
+            if bold:
+                c.fill = PatternFill("solid", fgColor="E2F2D6")
+    for i, col in enumerate(df.columns, 1):
+        width = max([len(str(col))] + [len(str(v)) for v in df[col].head(500).tolist()])
+        ws.column_dimensions[get_column_letter(i)].width = min(max(width + 2, 10), 80)
+    ws.freeze_panes = "A2"
+    buf = io.BytesIO(); wb.save(buf)
+    return buf.getvalue()
+
+
 def checklist_filter(label, options, key, cols=3, default_off=()):
     """A compact button ("People: all 7") that opens a checklist with Select all / Clear all.
     Returns the checked options."""
@@ -985,8 +1019,8 @@ def render_daily():
                     cfg["Links"] = st.column_config.LinkColumn("Links")
                 st.dataframe(rpt.style.apply(bold_totals, axis=1), hide_index=True, column_config=cfg,
                              height=min(36 * (len(rpt) + 1) + 4, 720))
-                st.download_button("Download", rpt.to_csv(index=False).encode("utf-8-sig"),
-                                   file_name=f"daily_performance_{s:%Y%m%d}_{e:%Y%m%d}.csv", mime="text/csv",
+                st.download_button("Download (Excel)", to_xlsx(rpt, "Daily performance", bold_rows_col="Rep"),
+                                   file_name=f"daily_performance_{s:%Y%m%d}_{e:%Y%m%d}.xlsx", mime=XLSX_MIME,
                                    key="daily_dl")
 
 
@@ -1238,8 +1272,8 @@ with tab_history:
                         cfg["Link"] = st.column_config.LinkColumn("Links")
                     st.dataframe(rpt, hide_index=True, column_config=cfg,
                                  height=min(38 * (len(rpt) + 1) + 4, 460))
-                    st.download_button("Download these leads", rpt.to_csv(index=False).encode("utf-8-sig"),
-                                       file_name=f"{who.replace(' ', '_')}_{col}.csv", mime="text/csv",
+                    st.download_button("Download these leads (Excel)", to_xlsx(rpt, "Leads", bold_rows_col="Rep"),
+                                       file_name=f"{who.replace(' ', '_')}_{col}.xlsx", mime=XLSX_MIME,
                                        key="setter_clicked_dl")
 
         with st.container(border=True):
@@ -1657,6 +1691,6 @@ with tab_sales:
                            if CRM_LEAD_URL else {})
                     st.dataframe(leads_tbl, hide_index=True, column_config=cfg,
                                  height=min(38 * (len(leads_tbl) + 1) + 4, 420))
-                    st.download_button("Download these leads", leads_tbl.to_csv(index=False).encode("utf-8-sig"),
-                                       file_name=f"{who.replace(' ', '_')}_{col.replace(' ', '_')}.csv",
-                                       mime="text/csv", key="clicked_leads_dl")
+                    st.download_button("Download these leads (Excel)", to_xlsx(leads_tbl, "Leads"),
+                                       file_name=f"{who.replace(' ', '_')}_{col.replace(' ', '_')}.xlsx",
+                                       mime=XLSX_MIME, key="clicked_leads_dl")
