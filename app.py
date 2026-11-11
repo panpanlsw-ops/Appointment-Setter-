@@ -108,6 +108,10 @@ WEB_SOURCES = ["web"]                       # build_source values counted as Web
 PHONE_SOURCES = ["custom", "invoca"]        # build_source values counted as Phone leads
 CHANNELS = ["Yelp", "Home Depot"]           # Channel values shown on the card
 
+# Optional flags in the all company tab, used for the "without …" rates on Sales vs setters
+SLEAD_COL = "Slead"                    # Y = S lead
+REPLACEMENT_COL = "is_replacement"     # TRUE = the customer had ordered before (returning customer)
+
 # Home Depot section on the History performance tab
 HD_CHANNEL = "Home Depot"
 HD_EXTRA_CREATORS = ["Nora Avanesian"]          # counted besides the appointment setters department
@@ -369,6 +373,10 @@ def company_data(tabs):
         "cancelled": has_apt & cancelled,
         "ordered": text(d[c["order"]]) != "",
         "status_text": status,
+        "slead": (text(d[SLEAD_COL]).str.upper().isin(["Y", "YES", "TRUE", "1"])
+                  if SLEAD_COL in d.columns else False),
+        "replacement": (text(d[REPLACEMENT_COL]).str.upper().isin(["TRUE", "Y", "YES", "1"])
+                        if REPLACEMENT_COL in d.columns else False),
         # installs: IS amount has a value; IS reps = who sold the install
         "is_amount": (pd.to_numeric(text(d[INSTALL_COLS["amount"]]).str.replace(r"[$,]", "", regex=True), errors="coerce")
                       if INSTALL_COLS["amount"] in d.columns else pd.Series(np.nan, index=d.index)),
@@ -1517,6 +1525,26 @@ with tab_sales:
         field = metrics(field_rows)
         # Order / Apt only counts orders that came from an appointment in the dates
         field["Orders from apts"] = field_rows[field_rows.is_order & (field_rows.is_apt | field_rows.is_cancel)].lead.nunique()
+
+        # Same rates without S leads / without returning customers (leads flagged on any of their rows)
+        def rates_without(flag):
+            drop = set(field_rows.loc[field_rows[flag], "lead"])
+            fr = field_rows[~field_rows.lead.isin(drop)]
+            n_l = fr[fr.is_lead].lead.nunique()
+            n_a = fr[fr.is_apt | fr.is_cancel].lead.nunique()
+            n_o = fr[fr.is_order & (fr.is_apt | fr.is_cancel)].lead.nunique()
+            return (n_a / n_l * 100 if n_l else np.nan, n_o / n_a * 100 if n_a else np.nan, len(drop))
+        no_s_apt, no_s_ord, n_s = rates_without("slead")
+        no_r_apt, no_r_ord, n_r = rates_without("replacement")
+
+        def without_line(v_s, v_r):
+            parts = []
+            if SLEAD_COL in tabs[ALL_TAB].columns:
+                parts.append(f"without S leads <b>{fmt_pct(v_s)}</b>")
+            if REPLACEMENT_COL in tabs[ALL_TAB].columns:
+                parts.append(f"without returning customers <b>{fmt_pct(v_r)}</b>")
+            return (f'<div class="l" style="font-size:13px;margin-top:6px">{" · ".join(parts)}</div>'
+                    if parts else "")
         # sales reps = leads owners, except people in the appointment setters department
         names = {n for n in set(R.owner) - {""} if rep_branch.get(n, "").lower() != SETTER_BRANCH.lower()}
         # A rep is a NAME + REGIONAL OFFICE: two people with the same name in different offices are
@@ -1566,11 +1594,11 @@ with tab_sales:
         st.markdown(f"""
         <div class="dash cmp">
           <div><h3>Apt / Leads</h3><div class="row">
-            <div><div class="v">{fmt_pct(field['Apt / Leads'])}</div><div class="l">{scope}</div></div>
+            <div><div class="v">{fmt_pct(field['Apt / Leads'])}</div><div class="l">{scope}</div>{without_line(no_s_apt, no_r_apt)}</div>
             <div><div class="v blue">{fmt_pct(setters['Apt / Leads'])}</div><div class="l">Appointment setters</div></div>
           </div></div>
           <div><h3>Order / Apt</h3><div class="row">
-            <div><div class="v">{fmt_pct(field['Orders from apts'] / field['Appointments'] * 100 if field['Appointments'] else np.nan)}</div><div class="l">{scope}</div></div>
+            <div><div class="v">{fmt_pct(field['Orders from apts'] / field['Appointments'] * 100 if field['Appointments'] else np.nan)}</div><div class="l">{scope}</div>{without_line(no_s_ord, no_r_ord)}</div>
             <div><div class="v blue">{fmt_pct(setters['Order / Apt'])}</div><div class="l">Appointment setters</div></div>
           </div></div>
         </div>""", unsafe_allow_html=True)
