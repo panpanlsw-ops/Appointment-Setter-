@@ -326,6 +326,10 @@ def setter_data(tabs):
         apts[c] = text(a[c])
     for df, src in ((apts, a), (leads, l)):
         df["source"] = text(src[SOURCE_COL]) if SOURCE_COL in src.columns else ""
+        df["slead"] = (text(src[SLEAD_COL]).str.upper().isin(["Y", "YES", "TRUE", "1"])
+                       if SLEAD_COL in src.columns else False)
+        df["replacement"] = (text(src[REPLACEMENT_COL]).str.upper().isin(["TRUE", "Y", "YES", "1"])
+                             if REPLACEMENT_COL in src.columns else False)
         df["channel"] = text(src[CHANNEL_COL]) if CHANNEL_COL in src.columns else ""
         df["owner"] = clean_name(src[ALL_COLS["owner"]]) if ALL_COLS["owner"] in src.columns else ""
         df["office"] = clean_office(src[OFFICE_COL]) if OFFICE_COL in src.columns else ""
@@ -1510,8 +1514,18 @@ with tab_sales:
                                  "Apt / Leads": n_a / n_l * 100 if n_l else np.nan,
                                  "Order / Apt": n_o / n_a * 100 if n_a else np.nan,
                                  "Order / Leads": n_o / n_l * 100 if n_l else np.nan}, dtype=float)
+
+            def setter_rates_without(flag):
+                drop = set(Lb.loc[Lb[flag], "lead"]) | set(Ab.loc[Ab[flag], "lead"])
+                l2, a2 = Lb[~Lb.lead.isin(drop)], Ab[~Ab.lead.isin(drop)]
+                nl2, na2 = l2.lead.nunique(), a2.lead.nunique()
+                no2 = a2[a2.ordered].lead.nunique()
+                return na2 / nl2 * 100 if nl2 else np.nan, no2 / na2 * 100 if na2 else np.nan
+            set_no_s_apt, set_no_s_ord = setter_rates_without("slead")
+            set_no_r_apt, set_no_r_ord = setter_rates_without("replacement")
         except ValueError:
             setters = pd.Series({"Apt / Leads": np.nan, "Order / Apt": np.nan, "Order / Leads": np.nan})
+            set_no_s_apt = set_no_s_ord = set_no_r_apt = set_no_r_ord = np.nan
 
         # Each rep's branch = their Regional Office (most common one on the leads they own)
         def mode_branch(df):
@@ -1606,11 +1620,11 @@ with tab_sales:
         <div class="dash cmp">
           <div><h3>Apt / Leads</h3><div class="row">
             <div><div class="v">{fmt_pct(field['Apt / Leads'])}</div><div class="l">{scope}</div>{without_line(no_s_apt, no_r_apt)}</div>
-            <div><div class="v blue">{fmt_pct(setters['Apt / Leads'])}</div><div class="l">Appointment setters</div></div>
+            <div><div class="v blue">{fmt_pct(setters['Apt / Leads'])}</div><div class="l">Appointment setters</div>{without_line(set_no_s_apt, set_no_r_apt)}</div>
           </div></div>
           <div><h3>Order / Apt</h3><div class="row">
             <div><div class="v">{fmt_pct(field['Orders from apts'] / field['Appointments'] * 100 if field['Appointments'] else np.nan)}</div><div class="l">{scope}</div>{without_line(no_s_ord, no_r_ord)}</div>
-            <div><div class="v blue">{fmt_pct(setters['Order / Apt'])}</div><div class="l">Appointment setters</div></div>
+            <div><div class="v blue">{fmt_pct(setters['Order / Apt'])}</div><div class="l">Appointment setters</div>{without_line(set_no_s_ord, set_no_r_ord)}</div>
           </div></div>
         </div>""", unsafe_allow_html=True)
         st.caption(f"{scope}: leads whose appointment the appointment setters set up are left out of both rates "
