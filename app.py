@@ -1626,9 +1626,11 @@ with tab_sales:
                        f"plus orders on leads without an appointment. Set by setters = appointments the appointment "
                        f"setters department set up. Orders, installs and Installed $ follow the appointment's row. "
                        f"Share of appts = this row's appointments ÷ the rep's total appointments (both rows). "
-                       f"Apt / Leads (Set by sales row) = the rep's own appointments ÷ the rep's leads, leaving out "
-                       f"leads the appointment setters booked (same rule as the Field reps box above). "
-                       f"Order / Apt = orders from those appointments ÷ appointments. Sorted by leads.")
+                       f"Leads are split between the two rows: Set by setters = the rep's leads the appointment setters "
+                       f"booked, Set by sales = all the others, so the two rows add up to the rep's leads. "
+                       f"Apt / Leads (Set by sales) = All appointments ÷ Leads of that row. Orders = orders from that "
+                       f"row's appointments, so Order / Apt = Orders ÷ All appointments. Orders, no apt = orders on "
+                       f"leads that never had an appointment (not in Order / Apt). Sorted by leads.")
             setter_row = is_setter_branch(R.apt_branch)
             SETBY = {"Set by sales": ~setter_row, "Set by setters": setter_row}
 
@@ -1639,8 +1641,8 @@ with tab_sales:
                 return {"All appointments": sub[sub.is_any_apt].lead.nunique(),
                         "Set up (active)": sub[sub.is_apt].lead.nunique(),
                         "Cancelled": sub[sub.is_cancel].lead.nunique(),
-                        "Orders": sub[sub.is_order].lead.nunique(),
-                        "_orders_apt": sub[sub.is_order & sub.is_any_apt].lead.nunique(),
+                        "Orders": sub[sub.is_order & sub.is_any_apt].lead.nunique(),      # from these appointments
+                        "Orders, no apt": sub[sub.is_order & ~sub.is_any_apt].lead.nunique(),
                         "Installs": n_inst, "Installed $": amt}
 
             rows, meta = [], []
@@ -1650,16 +1652,21 @@ with tab_sales:
                 n_leads = R[base & R.is_lead].lead.nunique()
                 # Same rule as the Field reps box: the rep's own Apt / Leads leaves out the leads
                 # whose appointment the appointment setters set up
-                n_own_leads = R[base & R.is_lead & ~R.lead.isin(setter_set_leads)].lead.nunique()
+                setter_lead = R.lead.isin(setter_set_leads)
+                n_row_leads = {"Set by sales": R[base & R.is_lead & ~setter_lead].lead.nunique(),
+                               "Set by setters": R[base & R.is_lead & setter_lead].lead.nunique()}
                 branch = "" if who == "All sales reps" else t.loc[who, "Branch"]
                 for k, (label, cond) in enumerate(SETBY.items()):
                     c_ = split_counts(base & cond)
-                    own_rate = (c_["All appointments"] / n_own_leads * 100 if n_own_leads else np.nan)
+                    if label == "Set by setters":
+                        c_["Orders, no apt"] = 0                 # orders without an appointment sit in the sales row
+                    nl = n_row_leads[label]
                     rows.append({"Branch": branch if k == 0 else "", "Sales rep": who if k == 0 else "",
-                                 "Set by": label, "Leads": n_leads if k == 0 else np.nan, **c_,
+                                 "Set by": label, "Leads": nl, **c_,
                                  # setters' row: no Apt / Leads here (their rate uses the leads they created)
-                                 "Apt / Leads": own_rate if label == "Set by sales" else np.nan,
-                                 "Order / Apt": (c_["_orders_apt"] / c_["All appointments"] * 100
+                                 "Apt / Leads": (c_["All appointments"] / nl * 100
+                                                 if label == "Set by sales" and nl else np.nan),
+                                 "Order / Apt": (c_["Orders"] / c_["All appointments"] * 100
                                                  if c_["All appointments"] else np.nan)})
                     meta.append((who, label))
             two = pd.DataFrame(rows)
@@ -1679,9 +1686,9 @@ with tab_sales:
                 return [css] * len(row)
 
             # Show numbers as text so empty cells stay empty (no "None")
-            disp = two.drop(columns=["_orders_apt"]).copy()
+            disp = two.copy()
             num = lambda v: "" if pd.isna(v) else f"{int(v):,}"
-            for c_ in ["Leads", "All appointments", "Set up (active)", "Cancelled", "Orders", "Installs"]:
+            for c_ in ["Leads", "All appointments", "Set up (active)", "Cancelled", "Orders", "Orders, no apt", "Installs"]:
                 disp[c_] = disp[c_].map(num)
             disp["Installed $"] = disp["Installed $"].map(lambda v: "" if pd.isna(v) else f"${v:,.0f}")
             for c_ in ["Apt / Leads", "Order / Apt"]:
@@ -1690,7 +1697,7 @@ with tab_sales:
                 "" if pd.isna(p_) else f"{p_:.1f}%  ({int(n_):,} of {int(tot_):,})"
                 for p_, n_, tot_ in zip(two["Share of appts"], two["All appointments"], two["_pair_total"])]
             disp = disp.drop(columns="_pair_total")
-            right = ["Leads", "All appointments", "Share of appts", "Set up (active)", "Cancelled", "Orders",
+            right = ["Leads", "All appointments", "Share of appts", "Set up (active)", "Cancelled", "Orders", "Orders, no apt",
                      "Installs", "Installed $", "Apt / Leads", "Order / Apt"]
             styled = disp.style.apply(row_style, axis=1)
             st.caption("Click a number to list those leads, with a link to each lead in the CRM, right below the table.")
@@ -1701,8 +1708,10 @@ with tab_sales:
                                file_name=f"sales_vs_setters_{s:%Y%m%d}_{e:%Y%m%d}.csv", mime="text/csv")
 
             # ---- the leads behind the clicked number
+            R = R.assign(order_apt=R.is_order & R.is_any_apt, order_no_apt=R.is_order & ~R.is_any_apt)
             CLICK_FLAGS = {"Leads": "is_lead", "All appointments": "is_any_apt", "Set up (active)": "is_apt",
-                           "Cancelled": "is_cancel", "Orders": "is_order", "Installs": "is_install"}
+                           "Cancelled": "is_cancel", "Orders": "order_apt", "Orders, no apt": "order_no_apt",
+                           "Installs": "is_install"}
             cells = picked.selection.cells if picked is not None and hasattr(picked, "selection") else []
             if cells:
                 row_pos, col = cells[0]
@@ -1711,7 +1720,10 @@ with tab_sales:
                     st.info(f"Click a number in one of these columns to see the leads: {', '.join(CLICK_FLAGS)}.")
                 else:
                     base = own if who == "All sales reps" else own & (R.rep == who)
-                    if col != "Leads":
+                    if col == "Leads":
+                        sl_ = R.lead.isin(setter_set_leads)
+                        base = base & (sl_ if label == "Set by setters" else ~sl_)
+                    else:
                         base = base & SETBY[label]
                     hit = R[R[CLICK_FLAGS[col]] & base].sort_values("apt_date").drop_duplicates("lead", keep="last")
                     leads_tbl = pd.DataFrame({
