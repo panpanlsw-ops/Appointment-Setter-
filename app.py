@@ -285,6 +285,15 @@ def to_dt(s):
     return pd.to_datetime(text(s).replace("", None), errors="coerce", format="mixed")
 
 
+def keep_listed_offices(df):
+    """Drop rows whose Regional Office is excluded (CSR Staff, National Sales Team, Service Staff, Commercial,
+    Appointment Setters) or empty, the same branches the Sales vs setters tab leaves out."""
+    if "office" not in df.columns:
+        return df
+    bad = {b.lower() for b in EXCLUDED_BRANCHES + [SETTER_BRANCH]} | {""}
+    return df[~df.office.str.lower().isin(bad)]
+
+
 def setter_data(tabs):
     """Returns (leads, apts) for the Setter performance tab, or raises ValueError."""
     for tab, cols in ((LEADS_TAB, LEADS_COLS), (APT_TAB, APT_COLS)):
@@ -1056,6 +1065,7 @@ with tab_history:
                        "no matter when the lead came in; orders follow those appointments.")
         else:
             s_leads, s_apts = setter_data(tabs)
+        s_leads, s_apts = keep_listed_offices(s_leads), keep_listed_offices(s_apts)
     except ValueError as err:
         st.error(str(err))
         s_leads = None
@@ -1491,6 +1501,7 @@ with tab_sales:
         # each in the dates picked here.
         try:
             sl_, sa_ = setter_data(tabs)
+            sl_, sa_ = keep_listed_offices(sl_), keep_listed_offices(sa_)
             Lb, Ab = in_range(sl_, s, e, "date"), in_range(sa_, s, e, "date")
             n_l, n_a = Lb.lead.nunique(), Ab.lead.nunique()
             n_o = Ab[Ab.ordered].lead.nunique()
