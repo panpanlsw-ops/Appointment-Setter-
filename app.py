@@ -141,7 +141,9 @@ INK, MUTED, BLUE, ORANGE, RULE = "#1B2230", "#5A6474", "#0E7A3C", "#8DC63F", "#D
 CRM_GREEN, CRM_GREEN_DARK, CRM_TAB, CRM_TAB_BORDER, CRM_RED = "#0E7A3C", "#0A5E2E", "#E2F2D6", "#A9CF95", "#C8102E"
 KINDS, KIND_COLORS = ["Inbound", "Outbound", "Missed"], ["#0E7A3C", "#8DC63F", "#AEB8C6"]
 
-st.set_page_config(page_title="Appointment Setter Dashboard", layout="wide")
+# Set to True by daily_app.py, the reps' dashboard that only shows the Daily performance report
+DAILY_ONLY = bool(globals().get("DAILY_ONLY", False))
+st.set_page_config(page_title="Daily performance" if DAILY_ONLY else "Appointment Setter Dashboard", layout="wide")
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&display=swap');
@@ -781,7 +783,7 @@ except Exception as err:
     st.caption("Check that the sheet is shared with the service account's email, and that the url in secrets is right.")
     st.stop()
 
-st.markdown('<div class="dash topbar"><h1>Appointment setting</h1>'
+st.markdown(f'<div class="dash topbar"><h1>{"Daily performance" if DAILY_ONLY else "Appointment setting"}</h1>'
             f'<span>{f"DEMO DATA: key file {KEY_FILE} not found next to app.py" if DEMO_MODE else ""}</span></div>',
             unsafe_allow_html=True)
 r1, r2 = st.columns([5, 1])
@@ -790,6 +792,124 @@ r1.caption(f"Data read from the sheet at {loaded_at:%b %d, %I:%M %p}. "
 if r2.button("Refresh now", width="stretch"):
     read_tabs.clear()
     st.rerun()
+
+# ---------------------------------------------------------------- DAILY PERFORMANCE (top of Setter performance)
+def render_daily():
+    daily_ws = next((n for n in tabs if n.strip().lower() in DAILY_TAB_NAMES), None)
+    dly = None
+    if daily_ws is None:
+        st.info(f'Add a worksheet named "daily performance" to the Google Sheet to see this tab.')
+    else:
+        raw = tabs[daily_ws]
+        miss = missing_cols(raw, [v for k, v in DAILY_COLS.items() if k != "branch"])
+        if miss:
+            st.error(f'The "{daily_ws}" worksheet is missing {miss}. Headers found: {list(raw.columns)}.')
+        else:
+            dc = DAILY_COLS
+            dly = pd.DataFrame({
+                "lead": text(raw[dc["lead"]]),
+                "when": to_dt(raw[dc["date"]]),
+                "setter": clean_name(raw[dc["setter"]]),
+                "branch": text(raw[dc["branch"]]) if dc["branch"] in raw.columns else SETTER_BRANCH,
+                "owner": clean_name(raw[dc["owner"]]),
+                "office": clean_office(raw[dc["office"]]),
+            })
+            dly = dly[(dly.lead != "") & dly.when.notna()]
+            dly = dly[dly.branch.str.lower() == SETTER_BRANCH.lower()]           # appointment setters only
+            dly["day"] = dly.when.dt.normalize()
+
+    if dly is not None and not dly.empty:
+        lo, hi = dly.day.min().date(), dly.day.max().date()
+        f1, f2 = st.columns([3, 2])
+        with f1:
+            s, e = date_picker(f"daily_range_{lo}_{hi}", hi, hi, lo, hi, quick="Latest day")   # starts on the latest day
+        with f2:
+            pick = checklist_filter("Scheduled by", sorted(set(dly.setter) - {""}), key="daily_setters")
+        D = in_range(dly, s, e, "day")
+        D = D[D.setter.isin(pick)].sort_values("when").drop_duplicates(["day", "lead"])   # count by leads_id
+
+        kpi_strip([
+            ("Appointments scheduled", f"{len(D):,}", BLUE),
+            ("Days", f"{D.day.nunique():,}", None),
+            ("Sales reps", f"{D.owner.replace('', np.nan).nunique():,}", None),
+            ("Regional offices", f"{D.office.replace('', np.nan).nunique():,}", None),
+        ])
+
+        with st.container(border=True):
+            st.markdown("#### Appointments scheduled by day")
+            st.caption("One row per appointment (counted by leads_id). Rep = the lead's owner; Scheduled by = the "
+                       "appointment setter. Click a link to open the lead in the CRM.")
+            if D.empty:
+                st.caption("No appointments for these dates.")
+            else:
+                link = lambda lead: CRM_LEAD_URL.format(lead=lead) if CRM_LEAD_URL else lead
+                first_name = lambda n: n.split()[0] if n else ""
+                group_by = (st.radio("Group by", ["Scheduled by", "Day"], horizontal=True, key="daily_group",
+                                     help="Scheduled by: each setter's appointments together for the whole date range. "
+                                          "Day: one block per day.")
+                            if D.day.nunique() > 1 else "Day")
+                D = D.assign(_off=D.office.replace("", "~"))
+                rows = []
+                if group_by == "Scheduled by":
+                    # Setter -> all the appointments they scheduled in the range, with a subtotal per setter
+                    D = D.assign(_set=D.setter.replace("", "~"))
+                    order_ = D.groupby("_set").lead.size().sort_values(ascending=False).index   # busiest setter first
+                    for setter_ in order_:
+                        g = D[D._set == setter_].sort_values(["day", "_off", "owner", "when"])
+                        for i, (_, r) in enumerate(g.iterrows()):
+                            rows.append({
+                                "Scheduled by": (r.setter or "(no setter)") if i == 0 else "",
+                                "Day": f"{r.day:%m/%d/%Y}",
+                                "Regional office": r.office,
+                                "Rep": r.owner,
+                                "Appts scheduled": 1,
+                                "Links": link(r.lead),
+                            })
+                        rows.append({"Scheduled by": "", "Day": "", "Regional office": "",
+                                     "Rep": f"{first_name(r.setter) or '(no setter)'} total",
+                                     "Appts scheduled": len(g), "Links": ""})
+                    rows.append({"Scheduled by": "", "Day": "", "Regional office": "", "Rep": "Total",
+                                 "Appts scheduled": len(D), "Links": ""})
+                else:
+                    D = D.sort_values(["day", "_off", "owner", "when"])
+                    for day, g in D.groupby("day", sort=True):
+                        first_day, last_office = True, None
+                        for _, r in g.iterrows():
+                            rows.append({
+                                "Day": f"{day:%m/%d/%Y}" if first_day else "",
+                                "Regional office": r.office if r.office != last_office else "",
+                                "Rep": r.owner,
+                                "Appts scheduled": 1,
+                                "Links": link(r.lead),
+                                "Scheduled by": first_name(r.setter),
+                            })
+                            first_day, last_office = False, r.office
+                        if D.day.nunique() > 1:
+                            rows.append({"Day": "", "Regional office": "", "Rep": f"{day:%m/%d} total",
+                                         "Appts scheduled": len(g), "Links": "", "Scheduled by": ""})
+                    rows.append({"Day": "", "Regional office": "", "Rep": "Total", "Appts scheduled": len(D),
+                                 "Links": "", "Scheduled by": ""})
+                rpt = pd.DataFrame(rows)
+
+                def bold_totals(row):
+                    return (["font-weight: 700; background-color: #EEF6E8;"] * len(row)
+                            if str(row["Rep"]).endswith("total") or row["Rep"] == "Total" else [""] * len(row))
+
+                cfg = {"Appts scheduled": st.column_config.NumberColumn(format="%d")}
+                if CRM_LEAD_URL:
+                    cfg["Links"] = st.column_config.LinkColumn("Links")
+                st.dataframe(rpt.style.apply(bold_totals, axis=1), hide_index=True, column_config=cfg,
+                             height=min(36 * (len(rpt) + 1) + 4, 720))
+                st.download_button("Download (Excel)", to_xlsx(rpt, "Daily performance", bold_rows_col="Rep"),
+                                   file_name=f"daily_performance_{s:%Y%m%d}_{e:%Y%m%d}.xlsx", mime=XLSX_MIME,
+                                   key="daily_dl")
+
+
+
+# Daily-only dashboard (run through daily_app.py): just this report, no other tabs
+if DAILY_ONLY:
+    render_daily()
+    st.stop()
 
 tab_calls, tab_setters, tab_history, tab_sales = st.tabs(
     ["Phone calls", "Daily performance", "History performance", "Sales vs setters"])
@@ -979,118 +1099,6 @@ with tab_calls:
                 st.caption(f"Each bar = calls with Call Result “Missed Call” in that hour: {n_in:,} inbound, "
                            f"{n_out:,} outbound in total. Voicemail and hung up calls are not included. "
                            "Most missed calls: " + ", ".join(f"{int(h)}:00 ({n})" for h, n in zip(worst.hour, worst.total)) + ".")
-
-
-# ---------------------------------------------------------------- DAILY PERFORMANCE (top of Setter performance)
-def render_daily():
-    daily_ws = next((n for n in tabs if n.strip().lower() in DAILY_TAB_NAMES), None)
-    dly = None
-    if daily_ws is None:
-        st.info(f'Add a worksheet named "daily performance" to the Google Sheet to see this tab.')
-    else:
-        raw = tabs[daily_ws]
-        miss = missing_cols(raw, [v for k, v in DAILY_COLS.items() if k != "branch"])
-        if miss:
-            st.error(f'The "{daily_ws}" worksheet is missing {miss}. Headers found: {list(raw.columns)}.')
-        else:
-            dc = DAILY_COLS
-            dly = pd.DataFrame({
-                "lead": text(raw[dc["lead"]]),
-                "when": to_dt(raw[dc["date"]]),
-                "setter": clean_name(raw[dc["setter"]]),
-                "branch": text(raw[dc["branch"]]) if dc["branch"] in raw.columns else SETTER_BRANCH,
-                "owner": clean_name(raw[dc["owner"]]),
-                "office": clean_office(raw[dc["office"]]),
-            })
-            dly = dly[(dly.lead != "") & dly.when.notna()]
-            dly = dly[dly.branch.str.lower() == SETTER_BRANCH.lower()]           # appointment setters only
-            dly["day"] = dly.when.dt.normalize()
-
-    if dly is not None and not dly.empty:
-        lo, hi = dly.day.min().date(), dly.day.max().date()
-        f1, f2 = st.columns([3, 2])
-        with f1:
-            s, e = date_picker(f"daily_range_{lo}_{hi}", hi, hi, lo, hi, quick="Latest day")   # starts on the latest day
-        with f2:
-            pick = checklist_filter("Scheduled by", sorted(set(dly.setter) - {""}), key="daily_setters")
-        D = in_range(dly, s, e, "day")
-        D = D[D.setter.isin(pick)].sort_values("when").drop_duplicates(["day", "lead"])   # count by leads_id
-
-        kpi_strip([
-            ("Appointments scheduled", f"{len(D):,}", BLUE),
-            ("Days", f"{D.day.nunique():,}", None),
-            ("Sales reps", f"{D.owner.replace('', np.nan).nunique():,}", None),
-            ("Regional offices", f"{D.office.replace('', np.nan).nunique():,}", None),
-        ])
-
-        with st.container(border=True):
-            st.markdown("#### Appointments scheduled by day")
-            st.caption("One row per appointment (counted by leads_id). Rep = the lead's owner; Scheduled by = the "
-                       "appointment setter. Click a link to open the lead in the CRM.")
-            if D.empty:
-                st.caption("No appointments for these dates.")
-            else:
-                link = lambda lead: CRM_LEAD_URL.format(lead=lead) if CRM_LEAD_URL else lead
-                first_name = lambda n: n.split()[0] if n else ""
-                group_by = (st.radio("Group by", ["Scheduled by", "Day"], horizontal=True, key="daily_group",
-                                     help="Scheduled by: each setter's appointments together for the whole date range. "
-                                          "Day: one block per day.")
-                            if D.day.nunique() > 1 else "Day")
-                D = D.assign(_off=D.office.replace("", "~"))
-                rows = []
-                if group_by == "Scheduled by":
-                    # Setter -> all the appointments they scheduled in the range, with a subtotal per setter
-                    D = D.assign(_set=D.setter.replace("", "~"))
-                    order_ = D.groupby("_set").lead.size().sort_values(ascending=False).index   # busiest setter first
-                    for setter_ in order_:
-                        g = D[D._set == setter_].sort_values(["day", "_off", "owner", "when"])
-                        for i, (_, r) in enumerate(g.iterrows()):
-                            rows.append({
-                                "Scheduled by": (r.setter or "(no setter)") if i == 0 else "",
-                                "Day": f"{r.day:%m/%d/%Y}",
-                                "Regional office": r.office,
-                                "Rep": r.owner,
-                                "Appts scheduled": 1,
-                                "Links": link(r.lead),
-                            })
-                        rows.append({"Scheduled by": "", "Day": "", "Regional office": "",
-                                     "Rep": f"{first_name(r.setter) or '(no setter)'} total",
-                                     "Appts scheduled": len(g), "Links": ""})
-                    rows.append({"Scheduled by": "", "Day": "", "Regional office": "", "Rep": "Total",
-                                 "Appts scheduled": len(D), "Links": ""})
-                else:
-                    D = D.sort_values(["day", "_off", "owner", "when"])
-                    for day, g in D.groupby("day", sort=True):
-                        first_day, last_office = True, None
-                        for _, r in g.iterrows():
-                            rows.append({
-                                "Day": f"{day:%m/%d/%Y}" if first_day else "",
-                                "Regional office": r.office if r.office != last_office else "",
-                                "Rep": r.owner,
-                                "Appts scheduled": 1,
-                                "Links": link(r.lead),
-                                "Scheduled by": first_name(r.setter),
-                            })
-                            first_day, last_office = False, r.office
-                        if D.day.nunique() > 1:
-                            rows.append({"Day": "", "Regional office": "", "Rep": f"{day:%m/%d} total",
-                                         "Appts scheduled": len(g), "Links": "", "Scheduled by": ""})
-                    rows.append({"Day": "", "Regional office": "", "Rep": "Total", "Appts scheduled": len(D),
-                                 "Links": "", "Scheduled by": ""})
-                rpt = pd.DataFrame(rows)
-
-                def bold_totals(row):
-                    return (["font-weight: 700; background-color: #EEF6E8;"] * len(row)
-                            if str(row["Rep"]).endswith("total") or row["Rep"] == "Total" else [""] * len(row))
-
-                cfg = {"Appts scheduled": st.column_config.NumberColumn(format="%d")}
-                if CRM_LEAD_URL:
-                    cfg["Links"] = st.column_config.LinkColumn("Links")
-                st.dataframe(rpt.style.apply(bold_totals, axis=1), hide_index=True, column_config=cfg,
-                             height=min(36 * (len(rpt) + 1) + 4, 720))
-                st.download_button("Download (Excel)", to_xlsx(rpt, "Daily performance", bold_rows_col="Rep"),
-                                   file_name=f"daily_performance_{s:%Y%m%d}_{e:%Y%m%d}.xlsx", mime=XLSX_MIME,
-                                   key="daily_dl")
 
 
 # ---------------------------------------------------------------- TAB 2
