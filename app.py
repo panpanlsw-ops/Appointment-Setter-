@@ -1032,32 +1032,32 @@ def render_daily():
             else:
                 link = lambda lead: CRM_LEAD_URL.format(lead=lead) if CRM_LEAD_URL else lead
                 first_name = lambda n: n.split()[0] if n else ""
-                group_by = (st.radio("Group by", ["Sales rep", "Day"], horizontal=True, key="daily_group",
-                                     help="Sales rep: each rep's appointments together for the whole date range. "
+                group_by = (st.radio("Group by", ["Scheduled by", "Day"], horizontal=True, key="daily_group",
+                                     help="Scheduled by: each setter's appointments together for the whole date range. "
                                           "Day: one block per day.")
                             if D.day.nunique() > 1 else "Day")
                 D = D.assign(_off=D.office.replace("", "~"))
                 rows = []
-                if group_by == "Sales rep":
-                    # Regional office -> Rep -> all their appointments in the range, with a subtotal per rep
-                    D = D.sort_values(["_off", "owner", "when"])
-                    last_office = None
-                    for (off, owner), g in D.groupby(["_off", "owner"], sort=False):
+                if group_by == "Scheduled by":
+                    # Setter -> all the appointments they scheduled in the range, with a subtotal per setter
+                    D = D.assign(_set=D.setter.replace("", "~"))
+                    order_ = D.groupby("_set").lead.size().sort_values(ascending=False).index   # busiest setter first
+                    for setter_ in order_:
+                        g = D[D._set == setter_].sort_values(["day", "_off", "owner", "when"])
                         for i, (_, r) in enumerate(g.iterrows()):
                             rows.append({
-                                "Regional office": r.office if (i == 0 and r.office != last_office) else "",
-                                "Rep": r.owner if i == 0 else "",
-                                "Appts scheduled": 1,
+                                "Scheduled by": (r.setter or "(no setter)") if i == 0 else "",
                                 "Day": f"{r.day:%m/%d/%Y}",
+                                "Regional office": r.office,
+                                "Rep": r.owner,
+                                "Appts scheduled": 1,
                                 "Links": link(r.lead),
-                                "Scheduled by": first_name(r.setter),
                             })
-                            last_office = r.office
-                        if len(g) > 1:
-                            rows.append({"Regional office": "", "Rep": f"{owner or '(no rep)'} total",
-                                         "Appts scheduled": len(g), "Day": "", "Links": "", "Scheduled by": ""})
-                    rows.append({"Regional office": "", "Rep": "Total", "Appts scheduled": len(D),
-                                 "Day": "", "Links": "", "Scheduled by": ""})
+                        rows.append({"Scheduled by": "", "Day": "", "Regional office": "",
+                                     "Rep": f"{first_name(r.setter) or '(no setter)'} total",
+                                     "Appts scheduled": len(g), "Links": ""})
+                    rows.append({"Scheduled by": "", "Day": "", "Regional office": "", "Rep": "Total",
+                                 "Appts scheduled": len(D), "Links": ""})
                 else:
                     D = D.sort_values(["day", "_off", "owner", "when"])
                     for day, g in D.groupby("day", sort=True):
