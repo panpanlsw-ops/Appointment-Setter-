@@ -575,30 +575,50 @@ def period_picker(key, lo, hi):
 QUICK_RANGES = ["All dates", "Latest day", "This month", "Last month", "Last 7 days", "Last 30 days"]
 
 
+def week_options(lo, hi):
+    """Monday–Sunday weeks between lo and hi, newest first, labelled by month: 'Nov 2026 · Week of Nov 9 – Nov 15'."""
+    out = {}
+    monday = hi - dt.timedelta(days=hi.weekday())
+    while monday + dt.timedelta(days=6) >= lo:
+        sunday = monday + dt.timedelta(days=6)
+        out[f"{monday:%b %Y} · Week {monday:%b} {monday.day} – {sunday:%b} {sunday.day}"] = (monday, sunday)
+        monday -= dt.timedelta(days=7)
+    return out
+
+
 def date_picker(key, default_start, default_end, lo, hi, quick="All dates"):
-    """Quick pick + separate From / To boxes (each opens a calendar and closes after one click)."""
+    """Quick pick (ranges + every Monday–Sunday week) + separate From / To boxes."""
     k_from, k_to, k_quick = f"{key}_from", f"{key}_to", f"{key}_quick"
     st.session_state.setdefault(k_from, default_start)
     st.session_state.setdefault(k_to, default_end)
+    weeks = week_options(lo, hi)
+    this_mon = hi - dt.timedelta(days=hi.weekday())
+    first = hi.replace(day=1)
+    ranges = {
+        "All dates": (lo, hi),
+        "Latest day": (hi, hi),
+        "This week (Mon–Sun)": (this_mon, this_mon + dt.timedelta(days=6)),
+        "Last week (Mon–Sun)": (this_mon - dt.timedelta(days=7), this_mon - dt.timedelta(days=1)),
+        "This month": (first, hi),
+        "Last month": ((first - dt.timedelta(days=1)).replace(day=1), first - dt.timedelta(days=1)),
+        "Last 7 days": (hi - dt.timedelta(days=6), hi),
+        "Last 30 days": (hi - dt.timedelta(days=29), hi),
+        **weeks,
+    }
 
     def apply_quick():
-        q = st.session_state[k_quick]
-        first = hi.replace(day=1)
-        a, b = {
-            "All dates": (lo, hi),
-            "Latest day": (hi, hi),
-            "This month": (first, hi),
-            "Last month": ((first - dt.timedelta(days=1)).replace(day=1), first - dt.timedelta(days=1)),
-            "Last 7 days": (hi - dt.timedelta(days=6), hi),
-            "Last 30 days": (hi - dt.timedelta(days=29), hi),
-        }[q]
+        a, b = ranges.get(st.session_state[k_quick], (lo, hi))
         st.session_state[k_from] = min(max(a, lo), hi)
         st.session_state[k_to] = max(min(b, hi), lo)
 
     c1, c2, c3 = st.columns([1.15, 1, 1])
     st.session_state.setdefault(k_quick, quick)
-    c1.selectbox("Quick pick", QUICK_RANGES, key=k_quick, on_change=apply_quick,
-                 help=f"Based on the latest date in the sheet ({hi:%m/%d/%Y}).")
+    if st.session_state[k_quick] not in ranges:
+        st.session_state[k_quick] = quick
+    c1.selectbox("Quick pick", list(ranges), key=k_quick, on_change=apply_quick,
+                 help=f"Pick a range or a Monday–Sunday week (weeks are listed by month, newest first). "
+                      f"For several weeks in a row, set From to the first Monday and To to the last Sunday. "
+                      f"Latest date in the sheet: {hi:%m/%d/%Y}.")
     s = c2.date_input("From", min_value=lo, max_value=hi, key=k_from, format="MM/DD/YYYY")
     e = c3.date_input("To", min_value=lo, max_value=hi, key=k_to, format="MM/DD/YYYY")
     if s > e:
