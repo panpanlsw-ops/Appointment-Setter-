@@ -1030,25 +1030,53 @@ def render_daily():
             if D.empty:
                 st.caption("No appointments for these dates.")
             else:
-                D = D.assign(_off=D.office.replace("", "~")).sort_values(["day", "_off", "owner", "when"])
+                link = lambda lead: CRM_LEAD_URL.format(lead=lead) if CRM_LEAD_URL else lead
+                first_name = lambda n: n.split()[0] if n else ""
+                group_by = (st.radio("Group by", ["Sales rep", "Day"], horizontal=True, key="daily_group",
+                                     help="Sales rep: each rep's appointments together for the whole date range. "
+                                          "Day: one block per day.")
+                            if D.day.nunique() > 1 else "Day")
+                D = D.assign(_off=D.office.replace("", "~"))
                 rows = []
-                for day, g in D.groupby("day", sort=True):
-                    first_day, last_office = True, None
-                    for _, r in g.iterrows():
-                        rows.append({
-                            "Day": f"{day:%m/%d/%Y}" if first_day else "",
-                            "Regional office": r.office if r.office != last_office else "",
-                            "Rep": r.owner,
-                            "Appts scheduled": 1,
-                            "Links": CRM_LEAD_URL.format(lead=r.lead) if CRM_LEAD_URL else r.lead,
-                            "Scheduled by": r.setter.split()[0] if r.setter else "",
-                        })
-                        first_day, last_office = False, r.office
-                    if D.day.nunique() > 1:
-                        rows.append({"Day": "", "Regional office": "", "Rep": f"{day:%m/%d} total",
-                                     "Appts scheduled": len(g), "Links": "", "Scheduled by": ""})
-                rows.append({"Day": "", "Regional office": "", "Rep": "Total", "Appts scheduled": len(D),
-                             "Links": "", "Scheduled by": ""})
+                if group_by == "Sales rep":
+                    # Regional office -> Rep -> all their appointments in the range, with a subtotal per rep
+                    D = D.sort_values(["_off", "owner", "when"])
+                    last_office = None
+                    for (off, owner), g in D.groupby(["_off", "owner"], sort=False):
+                        for i, (_, r) in enumerate(g.iterrows()):
+                            rows.append({
+                                "Regional office": r.office if (i == 0 and r.office != last_office) else "",
+                                "Rep": r.owner if i == 0 else "",
+                                "Appts scheduled": 1,
+                                "Day": f"{r.day:%m/%d/%Y}",
+                                "Links": link(r.lead),
+                                "Scheduled by": first_name(r.setter),
+                            })
+                            last_office = r.office
+                        if len(g) > 1:
+                            rows.append({"Regional office": "", "Rep": f"{owner or '(no rep)'} total",
+                                         "Appts scheduled": len(g), "Day": "", "Links": "", "Scheduled by": ""})
+                    rows.append({"Regional office": "", "Rep": "Total", "Appts scheduled": len(D),
+                                 "Day": "", "Links": "", "Scheduled by": ""})
+                else:
+                    D = D.sort_values(["day", "_off", "owner", "when"])
+                    for day, g in D.groupby("day", sort=True):
+                        first_day, last_office = True, None
+                        for _, r in g.iterrows():
+                            rows.append({
+                                "Day": f"{day:%m/%d/%Y}" if first_day else "",
+                                "Regional office": r.office if r.office != last_office else "",
+                                "Rep": r.owner,
+                                "Appts scheduled": 1,
+                                "Links": link(r.lead),
+                                "Scheduled by": first_name(r.setter),
+                            })
+                            first_day, last_office = False, r.office
+                        if D.day.nunique() > 1:
+                            rows.append({"Day": "", "Regional office": "", "Rep": f"{day:%m/%d} total",
+                                         "Appts scheduled": len(g), "Links": "", "Scheduled by": ""})
+                    rows.append({"Day": "", "Regional office": "", "Rep": "Total", "Appts scheduled": len(D),
+                                 "Links": "", "Scheduled by": ""})
                 rpt = pd.DataFrame(rows)
 
                 def bold_totals(row):
