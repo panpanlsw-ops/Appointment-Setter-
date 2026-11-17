@@ -58,6 +58,12 @@ CALL_COLS = {
     "person":    "participant_name",
 }
 # Call results that count as missed (customer not reached / caller not answered)
+# Who counts as a person on the Phone calls tab: the appointment setters only.
+# Taken from the setter tabs (leads_create / apt_created) plus this list; GoTo names are renamed first.
+CALL_SETTERS = ["Alexandra Williams", "Alexi Martin", "Angelo Granada", "Daniel Cerrato", "Diego Soc Domingo",
+                "Evelyn Hernandez", "Fabio Davila", "Juan Sequera", "Lisa Porras", "Richard Foronda"]
+CALL_NAME_ALIAS = {"Lisa Porras Personal": "Lisa Porras", "Angelo Munoz": "Angelo Granada"}
+
 MISSED_RESULTS = ["Missed Call", "Sent to voicemail", "Hung up (in queue)",
                   "Hung up (on hold)", "Hung up (parked)",
                   "Hung up (in menu)"]   # set by build_calls_tab.py: inbound call ended in the phone menu, nobody on it
@@ -497,7 +503,7 @@ def to_seconds(x):
         return 0.0
 
 
-def normalize_calls(raw):
+def normalize_calls(raw, setters=None):
     """Clean call log, or raises ValueError if columns are missing."""
     missing = [v for v in CALL_COLS.values() if v not in raw.columns]
     if missing:
@@ -505,9 +511,18 @@ def normalize_calls(raw):
                          f"Headers found: {list(raw.columns)}. Fix the headers or CALL_COLS in app.py.")
     c = CALL_COLS
     result = text(raw[c["result"]])
+    # participant_name can hold several people ("Kristen Luna, Lisa Porras Personal"): keep the first
+    # appointment setter in it; a call with no setter on it gets no person
+    known = {n.strip() for n in (setters or CALL_SETTERS)}
+    def setter_of(names):
+        for n in str(names).split(","):
+            n = CALL_NAME_ALIAS.get(n.strip(), n.strip())
+            if n in known:
+                return n
+        return ""
     calls = pd.DataFrame({
         "datetime": to_dt(text(raw[c["date"]]) + " " + text(raw[c["time"]])),
-        "person": text(raw[c["person"]]),
+        "person": text(raw[c["person"]]).map(setter_of),
         "direction": text(raw[c["direction"]]).str.title(),
         "result": result,
         "missed": result.isin(MISSED_RESULTS),
@@ -518,8 +533,10 @@ def normalize_calls(raw):
     calls["date"] = calls.datetime.dt.normalize()
     calls["weekday"] = calls.weekday.where(calls.weekday != "", calls.datetime.dt.day_name())
     # "No one answered" / empty name = an inbound call nobody picked up: it belongs to the whole department
-    calls.loc[calls.person.str.lower().isin(["no one answered", "nobody"]), "person"] = ""
-    calls["dept_missed"] = (calls.direction == "Inbound") & calls.missed     # not answered: counted for the department
+    raw_name = text(raw[c["person"]])
+    nobody = raw_name.eq("") | raw_name.str.lower().isin(["no one answered", "nobody"])
+    # not answered, and either nobody or a setter was on it (calls rung only to other staff are not ours)
+    calls["dept_missed"] = (calls.direction == "Inbound") & calls.missed & (nobody | (calls.person != ""))
     return calls[calls.datetime.notna() & ((calls.person != "") | calls.dept_missed)], raw
 
 
@@ -923,12 +940,17 @@ with tab_calls:
     calls = raw_calls = None
     try:
         if DEMO_MODE:
-            calls, raw_calls = normalize_calls(demo_calls(["Lisa Porras", "Fabio Davila", "Maya Chen", "Omar Reyes"]))
+            calls, raw_calls = normalize_calls(demo_calls(["Lisa Porras", "Fabio Davila", "Maya Chen", "Omar Reyes"]), ["Lisa Porras", "Fabio Davila", "Maya Chen", "Omar Reyes"])
         elif CALLS_TAB not in tabs or len(tabs[CALLS_TAB].columns) == 0:
             st.info(f'Add a worksheet named "{CALLS_TAB}" with the appointment setters\' call data '
                     f"(apt_call_res from the notebook) to see call stats.")
         else:
-            calls, raw_calls = normalize_calls(tabs[CALLS_TAB])
+            setter_list = set(CALL_SETTERS)
+            for tab_, name_col, br_col in ((LEADS_TAB, "mark_salesname", "mbranch"), (APT_TAB, "apt salesname", "apt branch")):
+                if tab_ in tabs and {name_col, br_col} <= set(tabs[tab_].columns):
+                    t_ = tabs[tab_]
+                    setter_list |= set(clean_name(t_.loc[text(t_[br_col]).str.lower() == SETTER_BRANCH.lower(), name_col]))
+            calls, raw_calls = normalize_calls(tabs[CALLS_TAB], setter_list - {""})
     except ValueError as err:
         st.error(str(err))
 
