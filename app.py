@@ -59,7 +59,8 @@ CALL_COLS = {
 }
 # Call results that count as missed (customer not reached / caller not answered)
 MISSED_RESULTS = ["Missed Call", "Sent to voicemail", "Hung up (in queue)",
-                  "Hung up (on hold)", "Hung up (parked)"]
+                  "Hung up (on hold)", "Hung up (parked)",
+                  "Hung up (in menu)"]   # set by build_calls_tab.py: inbound call ended in the phone menu, nobody on it
 
 # ---- Sales vs setters tab ---------------------------------------------
 ALL_TAB = "all company"
@@ -516,7 +517,10 @@ def normalize_calls(raw):
     })
     calls["date"] = calls.datetime.dt.normalize()
     calls["weekday"] = calls.weekday.where(calls.weekday != "", calls.datetime.dt.day_name())
-    return calls[calls.datetime.notna() & (calls.person != "")], raw
+    # "No one answered" / empty name = an inbound call nobody picked up: it belongs to the whole department
+    calls.loc[calls.person.str.lower().isin(["no one answered", "nobody"]), "person"] = ""
+    calls["dept_missed"] = (calls.direction == "Inbound") & calls.missed     # not answered: counted for the department
+    return calls[calls.datetime.notna() & ((calls.person != "") | calls.dept_missed)], raw
 
 
 # =====================================================================
@@ -934,12 +938,14 @@ with tab_calls:
         with f1:
             periods = period_picker("calls_period", lo, hi)
         with f2:
-            people = sorted(calls.person.unique())
+            people = sorted(set(calls.person) - {""})
             pick = checklist_filter("People", people, key="calls_people")
         in_period = pd.Series(False, index=calls.index)
         for a_, b_ in periods:
             in_period |= (calls.datetime >= pd.Timestamp(a_)) & (calls.datetime < pd.Timestamp(b_) + pd.Timedelta(days=1))
-        mask = in_period & calls.person.isin(pick)
+        # Inbound calls nobody answered (missed / voicemail / hung up) belong to the whole department:
+        # always counted, whatever is ticked in People. Everything else follows the People filter.
+        mask = in_period & (calls.dept_missed | (calls.person.isin(pick) & ~calls.dept_missed))
         c = calls[mask & calls.direction.isin(["Inbound", "Outbound"])]   # internal calls left out
         # Three separate groups, no overlap: answered inbound, connected outbound, missed (either way)
         c = c.assign(kind=np.where(c.missed, "Missed", c.direction))
@@ -964,23 +970,27 @@ with tab_calls:
                     f"avg call <b>{mmss(ok.duration_sec.mean() if len(ok) else 0)}</b>")
 
         kpi_strip([
-            ("Inbound calls", f"{len(inb):,}", BLUE, [breakdown(inb, "Answered"), talk(in_ok)]),
+            ("Inbound calls", f"{len(inb):,}", BLUE,
+             [breakdown(inb, "Answered"), talk(in_ok),
+              '<span style="font-size:12px">Missed, Voicemail and Hung up = whole department (not by person)</span>']),
             ("Outbound calls", f"{len(outb):,}", ORANGE, [breakdown(outb, "Connected"), talk(out_ok)]),
             ("Avg calls / day", f"{len(talked) / n_days:,.0f}" if n_days else "0", None,
              [f"answered + connected ÷ {n_days} days"]),
         ], cols="minmax(0,2fr) minmax(0,2fr) minmax(0,1fr)")
-        st.caption("Inbound calls and Outbound calls count every call in that direction. Each is split into: "
-                   "Answered / Connected, Missed (Call Result = Missed Call), Voicemail (Sent to voicemail) and "
-                   "Hung up (hold) (hung up on hold, in the queue or parked). "
-                   "Talk time, avg call and Avg calls / day use only answered / connected calls.")
+        st.caption("Inbound calls = calls customers made to the department: Answered (by the people ticked) plus "
+                   "every inbound call nobody answered (Missed, Voicemail, Hung up on hold / in the queue / in the "
+                   "phone menu). Those not-answered calls belong to the whole department, so they don't change with "
+                   "the People filter. Outbound calls follow the People filter. Talk time, avg call and "
+                   "Avg calls / day use only answered / connected calls.")
 
-        g = c.groupby("person")
+        cp = c[~c.dept_missed]                                   # per person: department misses left out
+        g = cp.groupby("person")
         by = lambda df: df.groupby("person").size()
         tbl = pd.DataFrame({
-            "Inbound (all)": by(inb), "Inbound answered": by(inb[~inb.missed]), "Inbound missed": by(inb[inb.missed]),
+            "Inbound answered": by(cp[cp.direction == "Inbound"]),
             "Outbound (all)": by(outb), "Outbound connected": by(outb[~outb.missed]), "Outbound no answer": by(outb[outb.missed]),
         }).reindex(g.size().index).fillna(0).astype(int)
-        tbl["Total calls"] = tbl["Inbound (all)"] + tbl["Outbound (all)"]      # every inbound + outbound call
+        tbl["Total calls"] = tbl["Inbound answered"] + tbl["Outbound (all)"]
         tbl["Avg calls / day"] = (len_t := talked.groupby("person").size().reindex(tbl.index).fillna(0)) / g.date.nunique()
         tbl["Talk time"] = talked.groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
         tbl["Inbound time"] = talked[talked.kind == "Inbound"].groupby("person").duration_sec.sum().reindex(tbl.index).fillna(0)
@@ -995,7 +1005,7 @@ with tab_calls:
             with st.container(border=True, height=ROW1_H):
                 st.markdown("#### Calls by person (chart)")
                 # One bar per person: Inbound + Outbound (connected calls), same numbers as the table
-                pb = c.groupby(["person", "direction"]).size().rename("calls").reset_index()   # all calls, like Total calls
+                pb = cp.groupby(["person", "direction"]).size().rename("calls").reset_index()  # same as Total calls
                 pb["order"] = (pb.direction == "Outbound").astype(int)
                 tot_pb = pb.groupby("person").calls.sum().rename("total").reset_index()
                 y = alt.Y("person:N", sort=list(tbl.index), title=None, axis=alt.Axis(labelLimit=160))
@@ -1010,20 +1020,21 @@ with tab_calls:
                                                          color=INK).encode(
                     y=y, x="total:Q", text=alt.Text("total:Q", format=","))
                 st.altair_chart((bar + bar_labels).properties(height=ROW1_H - 190), width="stretch")
-                st.caption("Bar = Total calls in the table: dark green = Inbound (all), light green = Outbound (all). "
+                st.caption("Bar = Total calls in the table: dark green = Inbound answered, light green = Outbound (all). "
                            "Hover for each part.")
         with right:
             with st.container(border=True, height=ROW1_H):
                 st.markdown("#### Calls by person (table)")
-                st.caption("Inbound (all) = answered + missed. Outbound (all) = connected + no answer. "
-                           "Total calls = Inbound (all) + Outbound (all). Talk time, Avg call and Avg calls / day "
-                           "use answered / connected calls only.")
+                st.caption("Inbound answered = customer calls this person picked up (inbound calls nobody answered "
+                           "are counted for the whole department, in the Inbound calls card). Outbound (all) = connected "
+                           "+ no answer. Total calls = Inbound answered + Outbound (all). Talk time, Avg call and "
+                           "Avg calls / day use answered / connected calls only.")
                 show = tbl.copy()
                 tot = show.drop(columns=["Avg call", "Avg calls / day"]).sum()
                 tot["Avg calls / day"] = len(talked) / n_days if n_days else np.nan
                 tot["Avg call"] = tot["Talk time"] / len(talked) if len(talked) else np.nan
                 show.loc["Total"] = tot[show.columns]
-                for col in ("Inbound (all)", "Inbound answered", "Inbound missed", "Outbound (all)",
+                for col in ("Inbound answered", "Outbound (all)",
                             "Outbound connected", "Outbound no answer", "Total calls"):
                     show[col] = show[col].astype(int)
                 for col in ("Talk time", "Inbound time", "Outbound time"):
@@ -1096,8 +1107,9 @@ with tab_calls:
                     x="hour:O", y="total:Q", text="total:Q")
                 st.altair_chart((bars + labels).properties(height=280), width="stretch")
                 n_in, n_out = int((missed.direction == "Inbound").sum()), int((missed.direction == "Outbound").sum())
-                st.caption(f"Each bar = calls with Call Result “Missed Call” in that hour: {n_in:,} inbound, "
-                           f"{n_out:,} outbound in total. Voicemail and hung up calls are not included. "
+                st.caption(f"Each bar = calls with Call Result “Missed Call” in that hour: {n_in:,} inbound "
+                           f"(customers calling the department, all lines on the list), {n_out:,} outbound (by the "
+                           f"people ticked). Voicemail and hung up calls are not included. "
                            "Most missed calls: " + ", ".join(f"{int(h)}:00 ({n})" for h, n in zip(worst.hour, worst.total)) + ".")
 
 
