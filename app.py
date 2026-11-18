@@ -66,6 +66,9 @@ CALL_NAME_ALIAS = {"Lisa Porras Personal": "Lisa Porras", "Angelo Munoz": "Angel
 # Not counted as appointment setters anywhere on the dashboard (calls, daily, history, sales vs setters),
 # even if the sheet lists them under the Appointment Setters branch
 NOT_SETTERS = ["Richard Foronda"]
+# Shown in the People / Scheduled by lists on the Phone calls and Daily performance tabs, but unticked
+# when the page opens (tick them to include them)
+UNTICKED_BY_DEFAULT = ["Alexi Martin", "Daniel Cerrato"]
 
 
 def not_setter(names):
@@ -855,7 +858,8 @@ def render_daily():
         with f1:
             s, e = date_picker(f"daily_range_{lo}_{hi}", hi, hi, lo, hi, quick="Latest day")   # starts on the latest day
         with f2:
-            pick = checklist_filter("Scheduled by", sorted(set(dly.setter) - {""}), key="daily_setters")
+            pick = checklist_filter("Scheduled by", sorted(set(dly.setter) - {""}), key="daily_setters",
+                                    default_off=UNTICKED_BY_DEFAULT)
         D = in_range(dly, s, e, "day")
         D = D[D.setter.isin(pick)].sort_values("when").drop_duplicates(["day", "lead"])   # count by leads_id
 
@@ -972,7 +976,7 @@ with tab_calls:
             periods = period_picker("calls_period", lo, hi)
         with f2:
             people = sorted(set(calls.person) - {""})
-            pick = checklist_filter("People", people, key="calls_people")
+            pick = checklist_filter("People", people, key="calls_people", default_off=UNTICKED_BY_DEFAULT)
         in_period = pd.Series(False, index=calls.index)
         for a_, b_ in periods:
             in_period |= (calls.datetime >= pd.Timestamp(a_)) & (calls.datetime < pd.Timestamp(b_) + pd.Timedelta(days=1))
