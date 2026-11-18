@@ -61,8 +61,16 @@ CALL_COLS = {
 # Who counts as a person on the Phone calls tab: the appointment setters only.
 # Taken from the setter tabs (leads_create / apt_created) plus this list; GoTo names are renamed first.
 CALL_SETTERS = ["Alexandra Williams", "Alexi Martin", "Angelo Granada", "Daniel Cerrato", "Diego Soc Domingo",
-                "Evelyn Hernandez", "Fabio Davila", "Juan Sequera", "Lisa Porras", "Richard Foronda"]
-CALL_NAME_ALIAS = {"Lisa Porras Personal": "Lisa Porras", "Angelo Munoz": "Angelo Granada"}
+                "Evelyn Hernandez", "Fabio Davila", "Genesis Mejia", "Juan Sequera", "Lisa Porras"]
+CALL_NAME_ALIAS = {"Lisa Porras Personal": "Lisa Porras", "Angelo Munoz": "Angelo Granada", "Gen Mejia": "Genesis Mejia"}
+# Not counted as appointment setters anywhere on the dashboard (calls, daily, history, sales vs setters),
+# even if the sheet lists them under the Appointment Setters branch
+NOT_SETTERS = ["Richard Foronda"]
+
+
+def not_setter(names):
+    """True for names in NOT_SETTERS (suffixes like "- National Sales" ignored)."""
+    return clean_name(names).str.lower().isin([n.lower() for n in NOT_SETTERS])
 
 MISSED_RESULTS = ["Missed Call", "Sent to voicemail", "Hung up (in queue)",
                   "Hung up (on hold)", "Hung up (parked)",
@@ -318,8 +326,8 @@ def setter_data(tabs):
     l, a = tabs[LEADS_TAB], tabs[APT_TAB]
     A_COLS = resolve_cols(a, APT_COLS)
     # Keep only rows made by the appointment setters department
-    l = l[text(l[LEADS_COLS["branch"]]).str.lower() == SETTER_BRANCH.lower()]
-    a = a[text(a[A_COLS["branch"]]).str.lower() == SETTER_BRANCH.lower()]
+    l = l[(text(l[LEADS_COLS["branch"]]).str.lower() == SETTER_BRANCH.lower()) & ~not_setter(l[LEADS_COLS["setter"]])]
+    a = a[(text(a[A_COLS["branch"]]).str.lower() == SETTER_BRANCH.lower()) & ~not_setter(a[A_COLS["setter"]])]
     leads = pd.DataFrame({"lead": text(l[LEADS_COLS["lead"]]), "date": to_dt(l[LEADS_COLS["date"]]),
                           "setter": text(l[LEADS_COLS["setter"]])})
     status = text(a[A_COLS["status"]])
@@ -405,6 +413,8 @@ def company_data(tabs):
         "is_rep": clean_name(d[INSTALL_COLS["rep"]]) if INSTALL_COLS["rep"] in d.columns else "",
     })
     rows["installed"] = rows.is_amount.notna()
+    rows.loc[not_setter(rows.apt_by), "apt_branch"] = ""          # NOT_SETTERS: not the setters' appointments
+    rows.loc[not_setter(rows.person), "branch"] = ""               # ... nor leads created by the setters
     no_owner = int((rows.person == "").sum())
     # Orders have no date of their own: use the appointment date, or the lead date if no appointment
     rows["order_date"] = rows.apt_date.fillna(rows.date)
@@ -836,7 +846,7 @@ def render_daily():
                 "office": clean_office(raw[dc["office"]]),
             })
             dly = dly[(dly.lead != "") & dly.when.notna()]
-            dly = dly[dly.branch.str.lower() == SETTER_BRANCH.lower()]           # appointment setters only
+            dly = dly[(dly.branch.str.lower() == SETTER_BRANCH.lower()) & ~not_setter(dly.setter)]   # setters only
             dly["day"] = dly.when.dt.normalize()
 
     if dly is not None and not dly.empty:
@@ -950,7 +960,8 @@ with tab_calls:
                 if tab_ in tabs and {name_col, br_col} <= set(tabs[tab_].columns):
                     t_ = tabs[tab_]
                     setter_list |= set(clean_name(t_.loc[text(t_[br_col]).str.lower() == SETTER_BRANCH.lower(), name_col]))
-            calls, raw_calls = normalize_calls(tabs[CALLS_TAB], setter_list - {""})
+            setter_list -= set(NOT_SETTERS) | {""}
+            calls, raw_calls = normalize_calls(tabs[CALLS_TAB], setter_list)
     except ValueError as err:
         st.error(str(err))
 
