@@ -926,15 +926,43 @@ def render_daily():
                                  "Links": "", "Scheduled by": ""})
                 rpt = pd.DataFrame(rows)
 
-                def bold_totals(row):
-                    return (["font-weight: 700; background-color: #EEF6E8;"] * len(row)
-                            if str(row["Rep"]).endswith("total") or row["Rep"] == "Total" else [""] * len(row))
+                # On screen: a small totals table + a flat list where every row is complete, so any column
+                # can be sorted by clicking its header. The Excel download keeps the grouped report layout.
+                by_col = "Scheduled by" if group_by == "Scheduled by" else "Day"
+                flat = (D.sort_values(["_set", "day", "_off", "owner", "when"] if by_col == "Scheduled by"
+                                      else ["day", "_off", "owner", "when"])
+                        .assign(**{"Scheduled by": lambda x: x.setter.replace("", "(no setter)"),
+                                   "Day": lambda x: x.day.dt.date,
+                                   "Regional office": lambda x: x.office,
+                                   "Rep": lambda x: x.owner,
+                                   "Links": lambda x: x.lead.map(link)}))
+                flat_cols = (["Scheduled by", "Day", "Regional office", "Rep", "Links"] if by_col == "Scheduled by"
+                             else ["Day", "Regional office", "Rep", "Scheduled by", "Links"])
+                flat = flat[flat_cols]
 
-                cfg = {"Appts scheduled": st.column_config.NumberColumn(format="%d")}
-                if CRM_LEAD_URL:
-                    cfg["Links"] = st.column_config.LinkColumn("Links")
-                st.dataframe(rpt.style.apply(bold_totals, axis=1), hide_index=True, column_config=cfg,
-                             height=min(36 * (len(rpt) + 1) + 4, 720))
+                tot = (flat.groupby(by_col).size().rename("Appts scheduled")
+                       .sort_values(ascending=False) if by_col == "Scheduled by"
+                       else flat.groupby(by_col).size().rename("Appts scheduled"))
+                tot = tot.reset_index()
+                if by_col == "Day":
+                    tot["Day"] = pd.to_datetime(tot["Day"]).dt.strftime("%m/%d/%Y")
+                tot = pd.concat([tot, pd.DataFrame([{by_col: "Total", "Appts scheduled": len(flat)}])],
+                                ignore_index=True)
+
+                t1, t2 = st.columns([1, 3], gap="medium")
+                with t1:
+                    st.markdown(f"**Appointments by {by_col.lower()}**")
+                    st.dataframe(tot.style.apply(lambda r: ["font-weight: 700; background-color: #EEF6E8;"] * len(r)
+                                                 if r[by_col] == "Total" else [""] * len(r), axis=1),
+                                 hide_index=True, height=min(36 * (len(tot) + 1) + 4, 720),
+                                 column_config={"Appts scheduled": st.column_config.NumberColumn(format="%d")})
+                with t2:
+                    st.markdown(f"**All appointments ({len(flat):,})** · click a column header to sort")
+                    cfg = {"Day": st.column_config.DateColumn("Day", format="MM/DD/YYYY")}
+                    if CRM_LEAD_URL:
+                        cfg["Links"] = st.column_config.LinkColumn("Links", display_text=r"leads_id=(\d+)")
+                    st.dataframe(flat, hide_index=True, column_config=cfg,
+                                 height=min(36 * (len(flat) + 1) + 4, 720))
                 st.download_button("Download (Excel)", to_xlsx(rpt, "Daily performance", bold_rows_col="Rep"),
                                    file_name=f"daily_performance_{s:%Y%m%d}_{e:%Y%m%d}.xlsx", mime=XLSX_MIME,
                                    key="daily_dl")
