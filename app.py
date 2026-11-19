@@ -883,14 +883,18 @@ def render_daily():
                                      help="Scheduled by: each setter's appointments together for the whole date range. "
                                           "Day: one block per day.")
                             if D.day.nunique() > 1 else "Day")
+                sort_by = st.radio("Sort rows inside each group by", ["Day", "Rep", "Regional office"],
+                                   horizontal=True, key="daily_sort")
                 D = D.assign(_off=D.office.replace("", "~"))
+                inner = {"Day": ["day", "_off", "owner", "when"], "Rep": ["owner", "day", "when"],
+                         "Regional office": ["_off", "owner", "day", "when"]}[sort_by]
                 rows = []
                 if group_by == "Scheduled by":
                     # Setter -> all the appointments they scheduled in the range, with a subtotal per setter
                     D = D.assign(_set=D.setter.replace("", "~"))
                     order_ = D.groupby("_set").lead.size().sort_values(ascending=False).index   # busiest setter first
                     for setter_ in order_:
-                        g = D[D._set == setter_].sort_values(["day", "_off", "owner", "when"])
+                        g = D[D._set == setter_].sort_values(inner)
                         for i, (_, r) in enumerate(g.iterrows()):
                             rows.append({
                                 "Scheduled by": (r.setter or "(no setter)") if i == 0 else "",
@@ -906,7 +910,7 @@ def render_daily():
                     rows.append({"Scheduled by": "", "Day": "", "Regional office": "", "Rep": "Total",
                                  "Appts scheduled": len(D), "Links": ""})
                 else:
-                    D = D.sort_values(["day", "_off", "owner", "when"])
+                    D = D.sort_values(["day"] + [c_ for c_ in inner if c_ != "day"])
                     for day, g in D.groupby("day", sort=True):
                         first_day, last_office = True, None
                         for _, r in g.iterrows():
@@ -926,43 +930,34 @@ def render_daily():
                                  "Links": "", "Scheduled by": ""})
                 rpt = pd.DataFrame(rows)
 
-                # On screen: a small totals table + a flat list where every row is complete, so any column
-                # can be sorted by clicking its header. The Excel download keeps the grouped report layout.
-                by_col = "Scheduled by" if group_by == "Scheduled by" else "Day"
-                flat = (D.sort_values(["_set", "day", "_off", "owner", "when"] if by_col == "Scheduled by"
-                                      else ["day", "_off", "owner", "when"])
-                        .assign(**{"Scheduled by": lambda x: x.setter.replace("", "(no setter)"),
-                                   "Day": lambda x: x.day.dt.date,
-                                   "Regional office": lambda x: x.office,
-                                   "Rep": lambda x: x.owner,
-                                   "Links": lambda x: x.lead.map(link)}))
-                flat_cols = (["Scheduled by", "Day", "Regional office", "Rep", "Links"] if by_col == "Scheduled by"
-                             else ["Day", "Regional office", "Rep", "Scheduled by", "Links"])
-                flat = flat[flat_cols]
-
-                tot = (flat.groupby(by_col).size().rename("Appts scheduled")
-                       .sort_values(ascending=False) if by_col == "Scheduled by"
-                       else flat.groupby(by_col).size().rename("Appts scheduled"))
-                tot = tot.reset_index()
-                if by_col == "Day":
-                    tot["Day"] = pd.to_datetime(tot["Day"]).dt.strftime("%m/%d/%Y")
-                tot = pd.concat([tot, pd.DataFrame([{by_col: "Total", "Appts scheduled": len(flat)}])],
-                                ignore_index=True)
-
-                t1, t2 = st.columns([1, 3], gap="medium")
-                with t1:
-                    st.markdown(f"**Appointments by {by_col.lower()}**")
-                    st.dataframe(tot.style.apply(lambda r: ["font-weight: 700; background-color: #EEF6E8;"] * len(r)
-                                                 if r[by_col] == "Total" else [""] * len(r), axis=1),
-                                 hide_index=True, height=min(36 * (len(tot) + 1) + 4, 720),
-                                 column_config={"Appts scheduled": st.column_config.NumberColumn(format="%d")})
-                with t2:
-                    st.markdown(f"**All appointments ({len(flat):,})** · click a column header to sort")
-                    cfg = {"Day": st.column_config.DateColumn("Day", format="MM/DD/YYYY")}
-                    if CRM_LEAD_URL:
-                        cfg["Links"] = st.column_config.LinkColumn("Links", display_text=r"leads_id=(\d+)")
-                    st.dataframe(flat, hide_index=True, column_config=cfg,
-                                 height=min(36 * (len(flat) + 1) + 4, 720))
+                # Shown as a fixed table (same report layout), so clicking a header can't scramble the groups;
+                # use "Sort rows inside each group by" above to change the order.
+                import html as _html
+                def cell(col, v):
+                    v = "" if v is None or (isinstance(v, float) and pd.isna(v)) else v
+                    if col == "Links" and isinstance(v, str) and v.startswith("http"):
+                        return f'<a href="{_html.escape(v)}" target="_blank">{_html.escape(v)}</a>'
+                    return _html.escape(str(v))
+                head = "".join(f"<th>{_html.escape(c_)}</th>" for c_ in rpt.columns)
+                body = ""
+                for _, r in rpt.iterrows():
+                    is_tot = str(r["Rep"]).endswith("total") or r["Rep"] == "Total"
+                    body += (f'<tr class="{"tot" if is_tot else ""}">'
+                             + "".join(f'<td class="{"num" if c_ == "Appts scheduled" else ""}">{cell(c_, r[c_])}</td>'
+                                       for c_ in rpt.columns) + "</tr>")
+                st.markdown(f"""
+<div class="dash" style="max-height:720px;overflow:auto;border:1px solid {RULE};border-radius:8px">
+<table class="rpt"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>
+<style>
+.rpt {{ border-collapse: collapse; width: 100%; font-size: 14px; }}
+.rpt th {{ position: sticky; top: 0; background: #F6F7F9; color: {MUTED}; font-weight: 500; text-align: left;
+          padding: 9px 12px; border-bottom: 1px solid {RULE}; white-space: nowrap; }}
+.rpt td {{ padding: 8px 12px; border-bottom: 1px solid #EEF1F4; color: {INK}; white-space: nowrap; }}
+.rpt td.num {{ text-align: right; }}
+.rpt tr.tot td {{ font-weight: 700; background: #EEF6E8; }}
+.rpt a {{ color: #1F5FBF; text-decoration: none; }}
+.rpt a:hover {{ text-decoration: underline; }}
+</style>""", unsafe_allow_html=True)
                 st.download_button("Download (Excel)", to_xlsx(rpt, "Daily performance", bold_rows_col="Rep"),
                                    file_name=f"daily_performance_{s:%Y%m%d}_{e:%Y%m%d}.xlsx", mime=XLSX_MIME,
                                    key="daily_dl")
